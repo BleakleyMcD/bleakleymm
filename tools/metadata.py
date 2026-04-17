@@ -31,31 +31,38 @@ def print_help():
   {GREEN}metadata.py{RESET} — extract MediaInfo, ffprobe, and ExifTool sidecars for files
 
 {BOLD}{BLUE}USAGE{RESET}
-  {GREEN}metadata.py{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}--no-mediainfo{RESET}] [{CYAN}--no-ffprobe{RESET}] [{CYAN}--no-exiftool{RESET}] [{CYAN}-n{RESET}]
+  {GREEN}metadata.py{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}--no-mediainfo{RESET}] [{CYAN}--no-ffprobe{RESET}] [{CYAN}--no-exiftool{RESET}] [{CYAN}--mediatrace{RESET}] [{CYAN}-n{RESET}]
 
 {BOLD}{BLUE}OPTIONS{RESET}
   {CYAN}-i{RESET} {YELLOW}PATH{RESET}          File or directory (directory is recursed)
-  {CYAN}--no-mediainfo{RESET}   Skip {YELLOW}mediainfo{RESET} (default: run)
+  {CYAN}--no-mediainfo{RESET}   Skip {YELLOW}mediainfo{RESET} (plain text + JSON) (default: run)
   {CYAN}--no-ffprobe{RESET}     Skip {YELLOW}ffprobe{RESET} (default: run)
   {CYAN}--no-exiftool{RESET}    Skip {YELLOW}exiftool{RESET} (default: run)
+  {CYAN}--mediatrace{RESET}     Also write mediainfo XML trace sidecar (default: off)
   {CYAN}-n{RESET}, {CYAN}--dry-run{RESET}     Print planned actions, write nothing
   {CYAN}-h{RESET}, {CYAN}--help{RESET}        Show this help
 
 {BOLD}{BLUE}EXAMPLES{RESET}
-  {DIM}# All three sidecars for a single file{RESET}
+  {DIM}# All sidecars for a single file{RESET}
   {GREEN}metadata.py{RESET} {CYAN}-i{RESET} /Volumes/archive/<file>
 
   {DIM}# Process a whole directory{RESET}
   {GREEN}metadata.py{RESET} {CYAN}-i{RESET} /Volumes/archive/<dir>
 
+  {DIM}# Add XML mediatrace alongside the usual outputs{RESET}
+  {GREEN}metadata.py{RESET} {CYAN}-i{RESET} /Volumes/archive/<dir> {CYAN}--mediatrace{RESET}
+
   {DIM}# ffprobe only{RESET}
   {GREEN}metadata.py{RESET} {CYAN}-i{RESET} /Volumes/archive/<file> {CYAN}--no-mediainfo{RESET} {CYAN}--no-exiftool{RESET}
 
 {BOLD}{BLUE}OUTPUT FILES{RESET}
-  One sidecar per tool, next to each source file:
-    {YELLOW}<file>.mediainfo.txt{RESET}  (from {YELLOW}mediainfo -f{RESET})
-    {YELLOW}<file>.ffprobe.json{RESET}   (from {YELLOW}ffprobe -show_format -show_streams -of json{RESET})
-    {YELLOW}<file>.exiftool.txt{RESET}   (from {YELLOW}exiftool{RESET})
+  Next to each source file:
+    {YELLOW}<file>.mediainfo.txt{RESET}   (from {YELLOW}mediainfo -f{RESET})
+    {YELLOW}<file>.mediainfo.json{RESET}  (from {YELLOW}mediainfo -f --Output=JSON{RESET})
+    {YELLOW}<file>.ffprobe.json{RESET}    (from {YELLOW}ffprobe -show_format -show_streams -of json{RESET})
+    {YELLOW}<file>.exiftool.txt{RESET}    (from {YELLOW}exiftool{RESET})
+  With {CYAN}--mediatrace{RESET}:
+    {YELLOW}<file>.mediatrace.xml{RESET}  (from {YELLOW}mediainfo --Details=1 --Output=XML{RESET})
   Existing sidecars are not overwritten.""")
 
 
@@ -89,9 +96,19 @@ def _run_capture(cmd: list[str], out: Path, tool: str, dry: bool) -> None:
         out.unlink(missing_ok=True)
 
 
-def run_mediainfo(f: Path, dry: bool) -> None:
+def run_mediainfo_text(f: Path, dry: bool) -> None:
     _run_capture(["mediainfo", "-f", str(f)],
                  f.with_name(f.name + ".mediainfo.txt"), "mediainfo", dry)
+
+
+def run_mediainfo_json(f: Path, dry: bool) -> None:
+    _run_capture(["mediainfo", "-f", "--Output=JSON", str(f)],
+                 f.with_name(f.name + ".mediainfo.json"), "mediainfo", dry)
+
+
+def run_mediatrace(f: Path, dry: bool) -> None:
+    _run_capture(["mediainfo", "--Details=1", "--Output=XML", str(f)],
+                 f.with_name(f.name + ".mediatrace.xml"), "mediatrace", dry)
 
 
 def run_ffprobe(f: Path, dry: bool) -> None:
@@ -120,6 +137,7 @@ def main() -> int:
     p.add_argument("--no-mediainfo", action="store_true")
     p.add_argument("--no-ffprobe", action="store_true")
     p.add_argument("--no-exiftool", action="store_true")
+    p.add_argument("--mediatrace", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 
     try:
@@ -138,6 +156,7 @@ def main() -> int:
     do_mi = not args.no_mediainfo
     do_ff = not args.no_ffprobe
     do_et = not args.no_exiftool
+    do_trace = args.mediatrace and do_mi  # --no-mediainfo also disables mediatrace
     if not (do_mi or do_ff or do_et):
         log.error("All tools disabled")
         return 2
@@ -154,7 +173,11 @@ def main() -> int:
 
     count = 0
     for f in _iter_source_files(path):
-        if do_mi: run_mediainfo(f, args.dry_run)
+        if do_mi:
+            run_mediainfo_text(f, args.dry_run)
+            run_mediainfo_json(f, args.dry_run)
+            if do_trace:
+                run_mediatrace(f, args.dry_run)
         if do_ff: run_ffprobe(f, args.dry_run)
         if do_et: run_exiftool(f, args.dry_run)
         count += 1

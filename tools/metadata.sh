@@ -32,31 +32,38 @@ ${BOLD}${BLUE}NAME${RESET}
   ${GREEN}metadata.sh${RESET} — extract MediaInfo, ffprobe, and ExifTool sidecars for files
 
 ${BOLD}${BLUE}USAGE${RESET}
-  ${GREEN}metadata.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}--no-mediainfo${RESET}] [${CYAN}--no-ffprobe${RESET}] [${CYAN}--no-exiftool${RESET}] [${CYAN}-n${RESET}]
+  ${GREEN}metadata.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}--no-mediainfo${RESET}] [${CYAN}--no-ffprobe${RESET}] [${CYAN}--no-exiftool${RESET}] [${CYAN}--mediatrace${RESET}] [${CYAN}-n${RESET}]
 
 ${BOLD}${BLUE}OPTIONS${RESET}
   ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}          File or directory (directory is recursed)
-  ${CYAN}--no-mediainfo${RESET}   Skip ${YELLOW}mediainfo${RESET} (default: run)
+  ${CYAN}--no-mediainfo${RESET}   Skip ${YELLOW}mediainfo${RESET} (plain text + JSON) (default: run)
   ${CYAN}--no-ffprobe${RESET}     Skip ${YELLOW}ffprobe${RESET} (default: run)
   ${CYAN}--no-exiftool${RESET}    Skip ${YELLOW}exiftool${RESET} (default: run)
+  ${CYAN}--mediatrace${RESET}     Also write mediainfo XML trace sidecar (default: off)
   ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}     Print planned actions, write nothing
   ${CYAN}-h${RESET}, ${CYAN}--help${RESET}        Show this help
 
 ${BOLD}${BLUE}EXAMPLES${RESET}
-  ${DIM}# All three sidecars for a single file${RESET}
+  ${DIM}# All sidecars for a single file${RESET}
   ${GREEN}metadata.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<file>
 
   ${DIM}# Process a whole directory${RESET}
   ${GREEN}metadata.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<dir>
 
+  ${DIM}# Add XML mediatrace alongside the usual outputs${RESET}
+  ${GREEN}metadata.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<dir> ${CYAN}--mediatrace${RESET}
+
   ${DIM}# ffprobe only${RESET}
   ${GREEN}metadata.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<file> ${CYAN}--no-mediainfo${RESET} ${CYAN}--no-exiftool${RESET}
 
 ${BOLD}${BLUE}OUTPUT FILES${RESET}
-  One sidecar per tool, next to each source file:
-    ${YELLOW}<file>.mediainfo.txt${RESET}  (from ${YELLOW}mediainfo -f${RESET})
-    ${YELLOW}<file>.ffprobe.json${RESET}   (from ${YELLOW}ffprobe -show_format -show_streams -of json${RESET})
-    ${YELLOW}<file>.exiftool.txt${RESET}   (from ${YELLOW}exiftool${RESET})
+  Next to each source file:
+    ${YELLOW}<file>.mediainfo.txt${RESET}   (from ${YELLOW}mediainfo -f${RESET})
+    ${YELLOW}<file>.mediainfo.json${RESET}  (from ${YELLOW}mediainfo -f --Output=JSON${RESET})
+    ${YELLOW}<file>.ffprobe.json${RESET}    (from ${YELLOW}ffprobe -show_format -show_streams -of json${RESET})
+    ${YELLOW}<file>.exiftool.txt${RESET}    (from ${YELLOW}exiftool${RESET})
+  With ${CYAN}--mediatrace${RESET}:
+    ${YELLOW}<file>.mediatrace.xml${RESET}  (from ${YELLOW}mediainfo --Details=1 --Output=XML${RESET})
   Existing sidecars are not overwritten.
 EOF
 }
@@ -99,9 +106,19 @@ _run_capture() {
     fi
 }
 
-_run_mediainfo() {
+_run_mediainfo_text() {
     local f="$1" dry="$2"
     _run_capture "${f}.mediainfo.txt" mediainfo "$dry" mediainfo -f "$f"
+}
+
+_run_mediainfo_json() {
+    local f="$1" dry="$2"
+    _run_capture "${f}.mediainfo.json" mediainfo "$dry" mediainfo -f --Output=JSON "$f"
+}
+
+_run_mediatrace() {
+    local f="$1" dry="$2"
+    _run_capture "${f}.mediatrace.xml" mediatrace "$dry" mediainfo --Details=1 --Output=XML "$f"
 }
 
 _run_ffprobe() {
@@ -117,7 +134,7 @@ _run_exiftool() {
 
 main() {
     if [[ $# -eq 0 ]]; then _usage; exit 0; fi
-    local input="" dry=0 do_mi=1 do_ff=1 do_et=1
+    local input="" dry=0 do_mi=1 do_ff=1 do_et=1 do_trace=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -i) input="${2:-}"; shift 2 ;;
@@ -125,11 +142,13 @@ main() {
             --no-mediainfo) do_mi=0; shift ;;
             --no-ffprobe) do_ff=0; shift ;;
             --no-exiftool) do_et=0; shift ;;
+            --mediatrace) do_trace=1; shift ;;
             -h|--help) _help; exit 0 ;;
             *) tbm_error "Unknown arg: $1"; _usage >&2; exit 2 ;;
         esac
     done
     [[ -n "$input" ]] || { tbm_error "-i INPUT required"; _usage >&2; exit 2; }
+    (( do_mi )) || do_trace=0  # --no-mediainfo also disables mediatrace
     (( do_mi || do_ff || do_et )) || { tbm_error "All tools disabled"; exit 2; }
 
     local deps=()
@@ -140,7 +159,11 @@ main() {
 
     local count=0 f
     while IFS= read -r f; do
-        (( do_mi )) && _run_mediainfo "$f" "$dry"
+        if (( do_mi )); then
+            _run_mediainfo_text "$f" "$dry"
+            _run_mediainfo_json "$f" "$dry"
+            (( do_trace )) && _run_mediatrace "$f" "$dry"
+        fi
         (( do_ff )) && _run_ffprobe "$f" "$dry"
         (( do_et )) && _run_exiftool "$f" "$dry"
         count=$((count+1))
