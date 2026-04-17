@@ -79,7 +79,7 @@ TBM_SIDECAR_SUFFIXES = (
     ".md5.txt", ".sha1.txt", ".sha224.txt", ".sha256.txt",
     ".sha384.txt", ".sha512.txt", ".crc32.txt",
     ".mediainfo.txt", ".mediainfo.json", ".mediatrace.xml",
-    ".ffprobe.json", ".exiftool.txt",
+    ".ffprobe.json", ".exiftool.txt", ".exiftool.json",
 )
 
 
