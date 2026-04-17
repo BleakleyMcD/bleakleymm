@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # fixity.sh - make (default) or verify hash sidecars for TBM files.
-# Writes <file>.<algo> sidecars in GNU sum format: "<hash>  <basename>"
 
 set -euo pipefail
 
@@ -19,7 +18,6 @@ else
 fi
 
 SUPPORTED_ALGOS=(md5 sha1 sha256 sha512 crc32)
-SIDECAR_EXTS=(md5 sha1 sha224 sha256 sha384 sha512 crc32)
 
 _usage() {
     cat <<EOF
@@ -36,33 +34,44 @@ ${BOLD}${BLUE}NAME${RESET}
   ${GREEN}fixity.sh${RESET} — make or verify hash sidecars for files
 
 ${BOLD}${BLUE}USAGE${RESET}
-  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] [${CYAN}-n${RESET}]           ${DIM}# make sidecars (default)${RESET}
-  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] ${CYAN}--verify${RESET}     ${DIM}# verify existing sidecars${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] [${CYAN}-p${RESET}] [${CYAN}-r${RESET}|${CYAN}-A${RESET}] [${CYAN}-n${RESET}]   ${DIM}# make (default)${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] ${CYAN}--verify${RESET}                   ${DIM}# verify${RESET}
 
 ${BOLD}${BLUE}OPTIONS${RESET}
   ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}                File or directory (directory is recursed)
   ${CYAN}-a${RESET}, ${CYAN}--algorithm${RESET} ${YELLOW}ALGO${RESET}   Hash algorithm: ${YELLOW}md5${RESET} (default), ${YELLOW}sha1${RESET}, ${YELLOW}sha256${RESET}, ${YELLOW}sha512${RESET}, ${YELLOW}crc32${RESET}
-  ${CYAN}-c${RESET}, ${CYAN}--verify${RESET}            Verify existing sidecars instead of making new ones
-  ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}           Print planned actions, write nothing (make mode only)
+  ${CYAN}-c${RESET}, ${CYAN}--verify${RESET}            Verify existing sidecars (auto-detects combined or per-file)
+  ${CYAN}-p${RESET}, ${CYAN}--per-file${RESET}          Directory input: write a sidecar per source file
+  ${CYAN}-r${RESET}, ${CYAN}--relative${RESET}          Combined mode: store paths relative to the input dir
+  ${CYAN}-A${RESET}, ${CYAN}--absolute${RESET}          Combined mode: store absolute paths
+  ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}           Print planned actions, write nothing
   ${CYAN}-h${RESET}, ${CYAN}--help${RESET}              Show this help
 
 ${BOLD}${BLUE}EXAMPLES${RESET}
-  ${DIM}# MD5 sidecars for a directory${RESET}
-  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID
+  ${DIM}# MD5 sidecar for a single file${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<file>
 
-  ${DIM}# SHA-256 instead of MD5${RESET}
-  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-a${RESET} sha256
+  ${DIM}# One combined MD5 manifest for a directory (default)${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<dir>
 
-  ${DIM}# Dry-run shows what would happen${RESET}
-  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-n${RESET}
+  ${DIM}# Per-file SHA-256 sidecars inside a directory${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<dir> ${CYAN}-a${RESET} sha256 ${CYAN}-p${RESET}
 
-  ${DIM}# Verify existing SHA-256 sidecars${RESET}
-  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-a${RESET} sha256 ${CYAN}--verify${RESET}
+  ${DIM}# Combined manifest with relative paths${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<dir> ${CYAN}-r${RESET}
+
+  ${DIM}# Verify (auto-detects combined or per-file)${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/<dir> ${CYAN}--verify${RESET}
 
 ${BOLD}${BLUE}SIDECAR FORMAT${RESET}
-  One sidecar per source file, named ${YELLOW}<file>.<algo>${RESET}
-  Content is GNU <algo>sum format (one line):
-      ${YELLOW}<hash>  <basename>${RESET}
+  Per-file (single file or ${CYAN}-p${RESET}):
+    One sidecar per source file: ${YELLOW}<file>.<algo>.txt${RESET}
+    Single-line content: ${YELLOW}<hash>  <basename>${RESET}
+
+  Combined (directory input, default):
+    One manifest inside the directory: ${YELLOW}<dir>/<dirname>.<algo>.txt${RESET}
+    One line per file: ${YELLOW}<hash>  <path>${RESET}
+    Path is the basename by default, relative with ${CYAN}-r${RESET}, absolute with ${CYAN}-A${RESET}.
 EOF
 }
 
@@ -116,19 +125,14 @@ PY
     esac
 }
 
-_hash_file() {
-    local f="$1" algo="$2"
-    printf '%s  %s\n' "$(_hash_only "$f" "$algo")" "$(basename "$f")"
-}
-
-_iter_files() {
+_iter_source_files() {
     local root="$1"
     if [[ -f "$root" ]]; then
         printf '%s\n' "$root"
     elif [[ -d "$root" ]]; then
-        local args=(-type f) ext
-        for ext in "${SIDECAR_EXTS[@]}"; do
-            args+=(! -name "*.${ext}")
+        local args=(-type f) algo
+        for algo in "${SUPPORTED_ALGOS[@]}"; do
+            args+=(! -name "*.${algo}.txt")
         done
         find "$root" "${args[@]}" | sort
     else
@@ -137,11 +141,20 @@ _iter_files() {
     fi
 }
 
-do_make() {
+_entry_path() {
+    local f="$1" root="$2" mode="$3"
+    case "$mode" in
+        absolute) printf '%s\n' "$f" ;;
+        relative) printf '%s\n' "${f#${root}/}" ;;
+        *)        basename "$f" ;;
+    esac
+}
+
+do_make_per_file() {
     local input="$1" algo="$2" dry="$3"
     local count=0 skipped=0 f sidecar
     while IFS= read -r f; do
-        sidecar="${f}.${algo}"
+        sidecar="${f}.${algo}.txt"
         if [[ -f "$sidecar" ]]; then
             tbm_info "skip (sidecar exists): $f"
             skipped=$((skipped+1))
@@ -150,20 +163,49 @@ do_make() {
         if (( dry )); then
             tbm_info "[dry-run] would write: $sidecar"
         else
-            _hash_file "$f" "$algo" > "$sidecar"
+            printf '%s  %s\n' "$(_hash_only "$f" "$algo")" "$(basename "$f")" > "$sidecar"
             tbm_ok "wrote $sidecar"
         fi
         count=$((count+1))
-    done < <(_iter_files "$input")
-
-    tbm_info "done: $count processed, $skipped skipped (algorithm: $algo)"
+    done < <(_iter_source_files "$input")
+    tbm_info "done: $count processed, $skipped skipped (algorithm: $algo, per-file)"
 }
 
-do_verify() {
+do_make_combined() {
+    local input="$1" algo="$2" dry="$3" mode="$4"
+    local name manifest count=0 entry f hash
+    name="$(basename "$input")"
+    manifest="${input%/}/${name}.${algo}.txt"
+
+    if [[ -f "$manifest" ]] && (( ! dry )); then
+        tbm_warn "manifest exists, overwriting: $manifest"
+    fi
+    (( dry )) || : > "$manifest"
+
+    while IFS= read -r f; do
+        entry="$(_entry_path "$f" "$input" "$mode")"
+        if (( dry )); then
+            tbm_info "[dry-run] would hash: $entry"
+        else
+            hash="$(_hash_only "$f" "$algo")"
+            printf '%s  %s\n' "$hash" "$entry" >> "$manifest"
+            tbm_info "hashed: $entry"
+        fi
+        count=$((count+1))
+    done < <(_iter_source_files "$input")
+
+    if (( dry )); then
+        tbm_info "[dry-run] would write manifest: $manifest ($count entries)"
+    else
+        tbm_ok "wrote $manifest ($count entries, path-mode: $mode)"
+    fi
+}
+
+do_verify_per_file() {
     local input="$1" algo="$2"
     local ok=0 failed=0 missing=0 f sidecar expected actual
     while IFS= read -r f; do
-        sidecar="${f}.${algo}"
+        sidecar="${f}.${algo}.txt"
         if [[ ! -f "$sidecar" ]]; then
             tbm_warn "no $algo sidecar: $f"
             missing=$((missing+1))
@@ -178,38 +220,104 @@ do_verify() {
             tbm_error "MISMATCH: $f (expected $expected, got $actual)"
             failed=$((failed+1))
         fi
-    done < <(_iter_files "$input")
-
-    tbm_info "verify: $ok ok, $failed failed, $missing missing (algorithm: $algo)"
+    done < <(_iter_source_files "$input")
+    tbm_info "verify: $ok ok, $failed failed, $missing missing (algorithm: $algo, per-file)"
     [[ $failed -eq 0 ]] || exit 1
 }
 
-main() {
-    if [[ $# -eq 0 ]]; then
-        _usage
-        exit 0
-    fi
+do_verify_combined() {
+    local manifest="$1" input="$2" algo="$3"
+    local ok=0 failed=0 missing=0 line hash entry file actual
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        hash="${line%%  *}"
+        entry="${line#*  }"
+        if [[ "$entry" = /* ]]; then
+            file="$entry"
+        else
+            file="${input%/}/${entry}"
+        fi
+        if [[ ! -f "$file" ]]; then
+            tbm_warn "missing file: $file (entry: $entry)"
+            missing=$((missing+1))
+            continue
+        fi
+        actual="$(_hash_only "$file" "$algo")"
+        if [[ "$hash" == "$actual" ]]; then
+            tbm_ok "match: $file"
+            ok=$((ok+1))
+        else
+            tbm_error "MISMATCH: $file (expected $hash, got $actual)"
+            failed=$((failed+1))
+        fi
+    done < "$manifest"
+    tbm_info "verify: $ok ok, $failed failed, $missing missing (algorithm: $algo, manifest: $manifest)"
+    [[ $failed -eq 0 ]] || exit 1
+}
 
-    local input="" algo="md5" dry=0 verify=0
+do_verify_auto() {
+    local input="$1" algo="$2"
+    if [[ -f "$input" ]]; then
+        do_verify_per_file "$input" "$algo"
+        return
+    fi
+    local name manifest
+    name="$(basename "$input")"
+    manifest="${input%/}/${name}.${algo}.txt"
+    if [[ -f "$manifest" ]]; then
+        do_verify_combined "$manifest" "$input" "$algo"
+    else
+        tbm_info "no combined manifest found, falling back to per-file"
+        do_verify_per_file "$input" "$algo"
+    fi
+}
+
+main() {
+    if [[ $# -eq 0 ]]; then _usage; exit 0; fi
+    local input="" algo="md5" dry=0 verify=0 per_file=0 rel=0 abs=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -i) input="${2:-}"; shift 2 ;;
             -a|--algorithm) algo="${2:-}"; shift 2 ;;
             -c|--verify) verify=1; shift ;;
             -n|--dry-run) dry=1; shift ;;
+            -p|--per-file) per_file=1; shift ;;
+            -r|--relative) rel=1; shift ;;
+            -A|--absolute) abs=1; shift ;;
             -h|--help) _help; exit 0 ;;
             *) tbm_error "Unknown arg: $1"; _usage >&2; exit 2 ;;
         esac
     done
-
     [[ -n "$input" ]] || { tbm_error "-i INPUT required"; _usage >&2; exit 2; }
     _algo_valid "$algo" || { tbm_error "Unsupported algorithm: $algo (supported: ${SUPPORTED_ALGOS[*]})"; exit 2; }
+    (( rel && abs )) && { tbm_error "--relative and --absolute are mutually exclusive"; exit 2; }
+
+    if [[ -d "$input" ]]; then
+        input="$(cd "$input" && pwd -P)"
+    fi
 
     if (( verify )); then
-        (( dry )) && { tbm_error "--dry-run is only valid in make mode"; exit 2; }
-        do_verify "$input" "$algo"
+        (( dry )) && { tbm_error "--dry-run is not valid with --verify"; exit 2; }
+        do_verify_auto "$input" "$algo"
+        return
+    fi
+
+    if [[ -f "$input" ]]; then
+        (( rel || abs )) && { tbm_error "--relative/--absolute only apply to directory input"; exit 2; }
+        do_make_per_file "$input" "$algo" "$dry"
+    elif [[ -d "$input" ]]; then
+        if (( per_file )); then
+            (( rel || abs )) && { tbm_error "--relative/--absolute don't apply to --per-file mode"; exit 2; }
+            do_make_per_file "$input" "$algo" "$dry"
+        else
+            local mode="basename"
+            (( rel )) && mode="relative"
+            (( abs )) && mode="absolute"
+            do_make_combined "$input" "$algo" "$dry" "$mode"
+        fi
     else
-        do_make "$input" "$algo" "$dry"
+        tbm_error "Not a file or directory: $input"
+        exit 2
     fi
 }
 
