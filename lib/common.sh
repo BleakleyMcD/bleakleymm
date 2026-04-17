@@ -37,3 +37,18 @@ tbm_require_one_of() {
 tbm_trap_sigterm() { trap 'tbm_error "Interrupted"; exit 130' INT TERM; }
 
 tbm_run_id() { date +%Y%m%dT%H%M%S; }
+
+# Known sidecar filename suffixes produced by tools in this repo.
+# Iteration helpers skip these so sidecars aren't reprocessed as sources.
+TBM_SIDECAR_SUFFIXES=(
+    .md5.txt .sha1.txt .sha224.txt .sha256.txt .sha384.txt .sha512.txt .crc32.txt
+    .mediainfo.txt .ffprobe.json .exiftool.txt
+)
+
+tbm_is_sidecar() {
+    local name="$1" suf
+    for suf in "${TBM_SIDECAR_SUFFIXES[@]}"; do
+        [[ "$name" == *"$suf" ]] && return 0
+    done
+    return 1
+}

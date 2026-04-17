@@ -130,9 +130,9 @@ _iter_source_files() {
     if [[ -f "$root" ]]; then
         printf '%s\n' "$root"
     elif [[ -d "$root" ]]; then
-        local args=(-type f) algo
-        for algo in "${SUPPORTED_ALGOS[@]}"; do
-            args+=(! -name "*.${algo}.txt")
+        local args=(-type f) suf
+        for suf in "${TBM_SIDECAR_SUFFIXES[@]}"; do
+            args+=(! -name "*${suf}")
         done
         find "$root" "${args[@]}" | sort
     else

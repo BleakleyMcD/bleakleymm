@@ -9,7 +9,7 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-from common import get_logger, install_sigterm_trap  # noqa: E402
+from common import get_logger, install_sigterm_trap, is_sidecar  # noqa: E402
 
 log = get_logger()
 
@@ -74,10 +74,6 @@ def print_help():
     Path is the basename by default, relative with {CYAN}-r{RESET}, absolute with {CYAN}-A{RESET}.""")
 
 
-def _is_sidecar(name: str) -> bool:
-    return any(name.endswith(f".{algo}.txt") for algo in SUPPORTED_ALGOS)
-
-
 def _hash_only(path: Path, algo: str) -> str:
     if algo == "crc32":
         c = 0
@@ -98,7 +94,7 @@ def _iter_source_files(root: Path) -> list[Path]:
     if root.is_dir():
         return sorted(
             p for p in root.rglob("*")
-            if p.is_file() and not _is_sidecar(p.name)
+            if p.is_file() and not is_sidecar(p.name)
         )
     log.error(f"Not a file or directory: {root}")
     sys.exit(2)

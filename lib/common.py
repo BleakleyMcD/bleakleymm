@@ -73,3 +73,14 @@ def install_sigterm_trap() -> None:
 
 def run_id() -> str:
     return datetime.now().strftime("%Y%m%dT%H%M%S")
+
+
+TBM_SIDECAR_SUFFIXES = (
+    ".md5.txt", ".sha1.txt", ".sha224.txt", ".sha256.txt",
+    ".sha384.txt", ".sha512.txt", ".crc32.txt",
+    ".mediainfo.txt", ".ffprobe.json", ".exiftool.txt",
+)
+
+
+def is_sidecar(name: str) -> bool:
+    return any(name.endswith(s) for s in TBM_SIDECAR_SUFFIXES)
