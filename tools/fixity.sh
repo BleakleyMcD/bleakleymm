@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fixity.sh - make or verify hash sidecars for TBM files.
+# fixity.sh - make (default) or verify hash sidecars for TBM files.
 # Writes <file>.<algo> sidecars in GNU sum format: "<hash>  <basename>"
 
 set -euo pipefail
@@ -18,13 +18,13 @@ else
     BOLD=''; BLUE=''; CYAN=''; GREEN=''; YELLOW=''; DIM=''; RESET=''
 fi
 
-SUPPORTED_ALGOS=(md5 sha1 sha256 sha512)
+SUPPORTED_ALGOS=(md5 sha1 sha256 sha512 crc32)
 SIDECAR_EXTS=(md5 sha1 sha224 sha256 sha384 sha512 crc32)
 
 _usage() {
     cat <<EOF
 ${BOLD}${BLUE}USAGE:${RESET}
-  ${GREEN}fixity.sh${RESET} <make|verify> ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [options]
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [options]
 
 Run ${GREEN}fixity.sh${RESET} ${CYAN}-h${RESET} for detailed help.
 EOF
@@ -36,31 +36,28 @@ ${BOLD}${BLUE}NAME${RESET}
   ${GREEN}fixity.sh${RESET} — make or verify hash sidecars for files
 
 ${BOLD}${BLUE}USAGE${RESET}
-  ${GREEN}fixity.sh${RESET} ${GREEN}make${RESET}   ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] [${CYAN}-n${RESET}]
-  ${GREEN}fixity.sh${RESET} ${GREEN}verify${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}]
-
-${BOLD}${BLUE}COMMANDS${RESET}
-  ${GREEN}make${RESET}      Compute hashes and write sidecars next to each file
-  ${GREEN}verify${RESET}    Recompute hashes and compare against existing sidecars
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] [${CYAN}-n${RESET}]           ${DIM}# make sidecars (default)${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-a${RESET} ${YELLOW}ALGO${RESET}] ${CYAN}--verify${RESET}     ${DIM}# verify existing sidecars${RESET}
 
 ${BOLD}${BLUE}OPTIONS${RESET}
   ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}                File or directory (directory is recursed)
-  ${CYAN}-a${RESET}, ${CYAN}--algorithm${RESET} ${YELLOW}ALGO${RESET}   Hash algorithm: ${YELLOW}md5${RESET} (default), ${YELLOW}sha1${RESET}, ${YELLOW}sha256${RESET}, ${YELLOW}sha512${RESET}
-  ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}           make: print planned actions, write nothing
+  ${CYAN}-a${RESET}, ${CYAN}--algorithm${RESET} ${YELLOW}ALGO${RESET}   Hash algorithm: ${YELLOW}md5${RESET} (default), ${YELLOW}sha1${RESET}, ${YELLOW}sha256${RESET}, ${YELLOW}sha512${RESET}, ${YELLOW}crc32${RESET}
+  ${CYAN}-c${RESET}, ${CYAN}--verify${RESET}            Verify existing sidecars instead of making new ones
+  ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}           Print planned actions, write nothing (make mode only)
   ${CYAN}-h${RESET}, ${CYAN}--help${RESET}              Show this help
 
 ${BOLD}${BLUE}EXAMPLES${RESET}
   ${DIM}# MD5 sidecars for a directory${RESET}
-  ${GREEN}fixity.sh${RESET} ${GREEN}make${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID
 
   ${DIM}# SHA-256 instead of MD5${RESET}
-  ${GREEN}fixity.sh${RESET} ${GREEN}make${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-a${RESET} sha256
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-a${RESET} sha256
 
   ${DIM}# Dry-run shows what would happen${RESET}
-  ${GREEN}fixity.sh${RESET} ${GREEN}make${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-n${RESET}
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-n${RESET}
 
   ${DIM}# Verify existing SHA-256 sidecars${RESET}
-  ${GREEN}fixity.sh${RESET} ${GREEN}verify${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-a${RESET} sha256
+  ${GREEN}fixity.sh${RESET} ${CYAN}-i${RESET} /Volumes/archive/MEDIAID ${CYAN}-a${RESET} sha256 ${CYAN}--verify${RESET}
 
 ${BOLD}${BLUE}SIDECAR FORMAT${RESET}
   One sidecar per source file, named ${YELLOW}<file>.<algo>${RESET}
@@ -77,23 +74,39 @@ _algo_valid() {
     return 1
 }
 
-_hash_file() {
-    local f="$1" algo="$2" base
-    base="$(basename "$f")"
+_hash_only() {
+    local f="$1" algo="$2"
     case "$algo" in
         md5)
             if command -v md5sum >/dev/null 2>&1; then
-                md5sum "$f" | awk -v b="$base" '{print $1"  "b}'
+                md5sum "$f" | awk '{print $1}'
             else
-                printf '%s  %s\n' "$(md5 -q "$f")" "$base"
+                md5 -q "$f"
             fi
             ;;
         sha1|sha256|sha512)
             local bits="${algo#sha}"
             if command -v "sha${bits}sum" >/dev/null 2>&1; then
-                "sha${bits}sum" "$f" | awk -v b="$base" '{print $1"  "b}'
+                "sha${bits}sum" "$f" | awk '{print $1}'
             else
-                shasum -a "$bits" "$f" | awk -v b="$base" '{print $1"  "b}'
+                shasum -a "$bits" "$f" | awk '{print $1}'
+            fi
+            ;;
+        crc32)
+            if command -v crc32 >/dev/null 2>&1; then
+                crc32 "$f"
+            else
+                python3 - "$f" <<'PY'
+import sys, zlib
+c = 0
+with open(sys.argv[1], "rb") as f:
+    while True:
+        d = f.read(1048576)
+        if not d:
+            break
+        c = zlib.crc32(d, c)
+print(f"{c:08x}")
+PY
             fi
             ;;
         *)
@@ -101,6 +114,11 @@ _hash_file() {
             exit 2
             ;;
     esac
+}
+
+_hash_file() {
+    local f="$1" algo="$2"
+    printf '%s  %s\n' "$(_hash_only "$f" "$algo")" "$(basename "$f")"
 }
 
 _iter_files() {
@@ -119,20 +137,8 @@ _iter_files() {
     fi
 }
 
-cmd_make() {
-    local input="" dry=0 algo="md5"
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -i) input="${2:-}"; shift 2 ;;
-            -a|--algorithm) algo="${2:-}"; shift 2 ;;
-            -n|--dry-run) dry=1; shift ;;
-            -h|--help) _help; exit 0 ;;
-            *) tbm_error "Unknown arg: $1"; _usage >&2; exit 2 ;;
-        esac
-    done
-    [[ -n "$input" ]] || { tbm_error "-i INPUT required"; _usage >&2; exit 2; }
-    _algo_valid "$algo" || { tbm_error "Unsupported algorithm: $algo (supported: ${SUPPORTED_ALGOS[*]})"; exit 2; }
-
+do_make() {
+    local input="$1" algo="$2" dry="$3"
     local count=0 skipped=0 f sidecar
     while IFS= read -r f; do
         sidecar="${f}.${algo}"
@@ -153,19 +159,8 @@ cmd_make() {
     tbm_info "done: $count processed, $skipped skipped (algorithm: $algo)"
 }
 
-cmd_verify() {
-    local input="" algo="md5"
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -i) input="${2:-}"; shift 2 ;;
-            -a|--algorithm) algo="${2:-}"; shift 2 ;;
-            -h|--help) _help; exit 0 ;;
-            *) tbm_error "Unknown arg: $1"; _usage >&2; exit 2 ;;
-        esac
-    done
-    [[ -n "$input" ]] || { tbm_error "-i INPUT required"; _usage >&2; exit 2; }
-    _algo_valid "$algo" || { tbm_error "Unsupported algorithm: $algo (supported: ${SUPPORTED_ALGOS[*]})"; exit 2; }
-
+do_verify() {
+    local input="$1" algo="$2"
     local ok=0 failed=0 missing=0 f sidecar expected actual
     while IFS= read -r f; do
         sidecar="${f}.${algo}"
@@ -175,7 +170,7 @@ cmd_verify() {
             continue
         fi
         expected="$(awk 'NR==1{print $1}' "$sidecar")"
-        actual="$(_hash_file "$f" "$algo" | awk '{print $1}')"
+        actual="$(_hash_only "$f" "$algo")"
         if [[ "$expected" == "$actual" ]]; then
             tbm_ok "match: $f"
             ok=$((ok+1))
@@ -190,14 +185,32 @@ cmd_verify() {
 }
 
 main() {
-    local sub="${1:-}"
-    case "$sub" in
-        make)   shift; cmd_make "$@" ;;
-        verify) shift; cmd_verify "$@" ;;
-        -h|--help) _help ;;
-        "") _usage ;;
-        *) tbm_error "Unknown subcommand: $sub"; _usage >&2; exit 2 ;;
-    esac
+    if [[ $# -eq 0 ]]; then
+        _usage
+        exit 0
+    fi
+
+    local input="" algo="md5" dry=0 verify=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i) input="${2:-}"; shift 2 ;;
+            -a|--algorithm) algo="${2:-}"; shift 2 ;;
+            -c|--verify) verify=1; shift ;;
+            -n|--dry-run) dry=1; shift ;;
+            -h|--help) _help; exit 0 ;;
+            *) tbm_error "Unknown arg: $1"; _usage >&2; exit 2 ;;
+        esac
+    done
+
+    [[ -n "$input" ]] || { tbm_error "-i INPUT required"; _usage >&2; exit 2; }
+    _algo_valid "$algo" || { tbm_error "Unsupported algorithm: $algo (supported: ${SUPPORTED_ALGOS[*]})"; exit 2; }
+
+    if (( verify )); then
+        (( dry )) && { tbm_error "--dry-run is only valid in make mode"; exit 2; }
+        do_verify "$input" "$algo"
+    else
+        do_make "$input" "$algo" "$dry"
+    fi
 }
 
 main "$@"

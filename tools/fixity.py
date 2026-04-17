@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""fixity.py - make or verify hash sidecars for TBM files."""
+"""fixity.py - make (default) or verify hash sidecars for TBM files."""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import sys
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -12,7 +13,7 @@ from common import get_logger, install_sigterm_trap  # noqa: E402
 
 log = get_logger()
 
-SUPPORTED_ALGOS = ("md5", "sha1", "sha256", "sha512")
+SUPPORTED_ALGOS = ("md5", "sha1", "sha256", "sha512", "crc32")
 SIDECAR_EXTS = {".md5", ".sha1", ".sha224", ".sha256", ".sha384", ".sha512", ".crc32"}
 
 if sys.stdout.isatty():
@@ -24,7 +25,7 @@ else:
 
 def print_usage(to=sys.stdout):
     print(f"{BOLD}{BLUE}USAGE:{RESET}", file=to)
-    print(f"  {GREEN}fixity.py{RESET} <make|verify> {CYAN}-i{RESET} {YELLOW}PATH{RESET} [options]", file=to)
+    print(f"  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [options]", file=to)
     print(file=to)
     print(f"Run {GREEN}fixity.py{RESET} {CYAN}-h{RESET} for detailed help.", file=to)
 
@@ -34,31 +35,28 @@ def print_help():
   {GREEN}fixity.py{RESET} — make or verify hash sidecars for files
 
 {BOLD}{BLUE}USAGE{RESET}
-  {GREEN}fixity.py{RESET} {GREEN}make{RESET}   {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}-a{RESET} {YELLOW}ALGO{RESET}] [{CYAN}-n{RESET}]
-  {GREEN}fixity.py{RESET} {GREEN}verify{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}-a{RESET} {YELLOW}ALGO{RESET}]
-
-{BOLD}{BLUE}COMMANDS{RESET}
-  {GREEN}make{RESET}      Compute hashes and write sidecars next to each file
-  {GREEN}verify{RESET}    Recompute hashes and compare against existing sidecars
+  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}-a{RESET} {YELLOW}ALGO{RESET}] [{CYAN}-n{RESET}]           {DIM}# make sidecars (default){RESET}
+  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}-a{RESET} {YELLOW}ALGO{RESET}] {CYAN}--verify{RESET}     {DIM}# verify existing sidecars{RESET}
 
 {BOLD}{BLUE}OPTIONS{RESET}
   {CYAN}-i{RESET} {YELLOW}PATH{RESET}                File or directory (directory is recursed)
-  {CYAN}-a{RESET}, {CYAN}--algorithm{RESET} {YELLOW}ALGO{RESET}   Hash algorithm: {YELLOW}md5{RESET} (default), {YELLOW}sha1{RESET}, {YELLOW}sha256{RESET}, {YELLOW}sha512{RESET}
-  {CYAN}-n{RESET}, {CYAN}--dry-run{RESET}           make: print planned actions, write nothing
+  {CYAN}-a{RESET}, {CYAN}--algorithm{RESET} {YELLOW}ALGO{RESET}   Hash algorithm: {YELLOW}md5{RESET} (default), {YELLOW}sha1{RESET}, {YELLOW}sha256{RESET}, {YELLOW}sha512{RESET}, {YELLOW}crc32{RESET}
+  {CYAN}-c{RESET}, {CYAN}--verify{RESET}            Verify existing sidecars instead of making new ones
+  {CYAN}-n{RESET}, {CYAN}--dry-run{RESET}           Print planned actions, write nothing (make mode only)
   {CYAN}-h{RESET}, {CYAN}--help{RESET}              Show this help
 
 {BOLD}{BLUE}EXAMPLES{RESET}
   {DIM}# MD5 sidecars for a directory{RESET}
-  {GREEN}fixity.py{RESET} {GREEN}make{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID
+  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID
 
   {DIM}# SHA-256 instead of MD5{RESET}
-  {GREEN}fixity.py{RESET} {GREEN}make{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID {CYAN}-a{RESET} sha256
+  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID {CYAN}-a{RESET} sha256
 
   {DIM}# Dry-run shows what would happen{RESET}
-  {GREEN}fixity.py{RESET} {GREEN}make{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID {CYAN}-n{RESET}
+  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID {CYAN}-n{RESET}
 
   {DIM}# Verify existing SHA-256 sidecars{RESET}
-  {GREEN}fixity.py{RESET} {GREEN}verify{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID {CYAN}-a{RESET} sha256
+  {GREEN}fixity.py{RESET} {CYAN}-i{RESET} /Volumes/archive/MEDIAID {CYAN}-a{RESET} sha256 {CYAN}--verify{RESET}
 
 {BOLD}{BLUE}SIDECAR FORMAT{RESET}
   One sidecar per source file, named {YELLOW}<file>.<algo>{RESET}
@@ -66,7 +64,13 @@ def print_help():
       {YELLOW}<hash>  <basename>{RESET}""")
 
 
-def _hash_file(path: Path, algo: str) -> str:
+def _hash_only(path: Path, algo: str) -> str:
+    if algo == "crc32":
+        c = 0
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                c = zlib.crc32(chunk, c)
+        return f"{c:08x}"
     h = hashlib.new(algo)
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -86,7 +90,7 @@ def _iter_files(root: Path) -> list[Path]:
     sys.exit(2)
 
 
-def cmd_make(input_: Path, algo: str, dry_run: bool) -> int:
+def do_make(input_: Path, algo: str, dry_run: bool) -> int:
     count = skipped = 0
     for f in _iter_files(input_):
         sidecar = f.with_name(f.name + f".{algo}")
@@ -97,7 +101,7 @@ def cmd_make(input_: Path, algo: str, dry_run: bool) -> int:
         if dry_run:
             log.info(f"[dry-run] would write: {sidecar}")
         else:
-            h = _hash_file(f, algo)
+            h = _hash_only(f, algo)
             sidecar.write_text(f"{h}  {f.name}\n")
             log.info(f"wrote {sidecar}")
         count += 1
@@ -105,7 +109,7 @@ def cmd_make(input_: Path, algo: str, dry_run: bool) -> int:
     return 0
 
 
-def cmd_verify(input_: Path, algo: str) -> int:
+def do_verify(input_: Path, algo: str) -> int:
     ok = failed = missing = 0
     for f in _iter_files(input_):
         sidecar = f.with_name(f.name + f".{algo}")
@@ -114,7 +118,7 @@ def cmd_verify(input_: Path, algo: str) -> int:
             missing += 1
             continue
         expected = sidecar.read_text().split()[0]
-        actual = _hash_file(f, algo)
+        actual = _hash_only(f, algo)
         if expected == actual:
             log.info(f"match: {f}")
             ok += 1
@@ -131,24 +135,16 @@ def main() -> int:
     if not argv:
         print_usage()
         return 0
-    if argv[0] in ("-h", "--help"):
-        print_help()
-        return 0
-    if argv[0] not in ("make", "verify"):
-        log.error(f"Unknown subcommand: {argv[0]}")
-        print_usage(to=sys.stderr)
-        return 2
 
-    cmd = argv[0]
-    p = argparse.ArgumentParser(prog=f"fixity.py {cmd}", add_help=False)
+    p = argparse.ArgumentParser(add_help=False)
     p.add_argument("-i", "--input")
     p.add_argument("-a", "--algorithm", default="md5", choices=SUPPORTED_ALGOS)
-    if cmd == "make":
-        p.add_argument("-n", "--dry-run", action="store_true")
+    p.add_argument("-c", "--verify", action="store_true")
+    p.add_argument("-n", "--dry-run", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 
     try:
-        args = p.parse_args(argv[1:])
+        args = p.parse_args(argv)
     except SystemExit as e:
         return int(e.code) if isinstance(e.code, int) else 2
 
@@ -159,11 +155,14 @@ def main() -> int:
         log.error("-i INPUT required")
         print_usage(to=sys.stderr)
         return 2
+    if args.verify and args.dry_run:
+        log.error("--dry-run is only valid in make mode")
+        return 2
 
     path = Path(args.input)
-    if cmd == "make":
-        return cmd_make(path, args.algorithm, args.dry_run)
-    return cmd_verify(path, args.algorithm)
+    if args.verify:
+        return do_verify(path, args.algorithm)
+    return do_make(path, args.algorithm, args.dry_run)
 
 
 if __name__ == "__main__":
