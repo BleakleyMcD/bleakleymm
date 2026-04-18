@@ -43,6 +43,7 @@ tbm_run_id() { date +%Y%m%dT%H%M%S; }
 TBM_SIDECAR_SUFFIXES=(
     .md5.txt .sha1.txt .sha224.txt .sha256.txt .sha384.txt .sha512.txt .crc32.txt
     .mediainfo.txt .mediainfo.json .mediatrace.xml .ffprobe.json .exiftool.txt .exiftool.json
+    .access.mp4
 )
 
 tbm_is_sidecar() {
