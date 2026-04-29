@@ -19,12 +19,7 @@
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source=../lib/common.sh
-source "${REPO_ROOT}/lib/common.sh"
-
-tbm_trap_sigterm
+trap 'printf "Interrupted\n" >&2; exit 130' INT TERM
 
 # ── Configuration ──────────────────────────────────────────────────────────
 NAS_220="192.168.3.220"
@@ -65,6 +60,14 @@ warn()  { printf "%s!%s %s\n" "${YELLOW}" "${RESET}" "$*"; }
 err()   { printf "%s✗%s %s\n" "${RED}" "${RESET}" "$*" >&2; }
 hdr()   { printf "\n%s%s%s\n" "${BOLD}" "$*" "${RESET}"; }
 rule()  { printf "%s\n" "────────────────────────────────────────────────────"; }
+
+require_cmds() {
+    local missing=0 dep
+    for dep in "$@"; do
+        command -v "$dep" >/dev/null 2>&1 || { err "Missing dependency: $dep"; missing=1; }
+    done
+    [ "$missing" -eq 0 ] || exit 1
+}
 
 # ── Usage / help ──────────────────────────────────────────────────────────
 _usage() {
@@ -109,7 +112,15 @@ ${BOLD}${BLUE}PATH TRANSLATION${RESET}
 ${BOLD}${BLUE}EXAMPLES${RESET}
   ${DIM}# Start the interactive queue builder${RESET}
   ${GREEN}rsync_queue${RESET}
+
+${BOLD}${BLUE}SHARE MAP${RESET} ${DIM}(edit the SHARE_MAP array in this script to add entries)${RESET}
 EOF
+    printf "  ${DIM}%-15s  %-32s  %s${RESET}\n" "Host" "Share" "Server path"
+    local entry e_host e_share e_path
+    for entry in "${SHARE_MAP[@]}"; do
+        IFS='|' read -r e_host e_share e_path <<< "$entry"
+        printf "  ${YELLOW}%-15s${RESET}  %-32s  %s\n" "$e_host" "$e_share" "$e_path"
+    done
 }
 
 # ── Mount discovery: parse `mount` for current SMB mounts ─────────────────
@@ -338,7 +349,7 @@ main() {
         esac
     done
 
-    tbm_require mount awk sed ssh scp
+    require_cmds mount awk sed ssh scp
 
     hdr "rsync queue builder"
     info "Builds a queue of rsync transfers and runs them sequentially on ${NAS_220} in tmux."
