@@ -3,5 +3,3 @@
 *.log
 *.conf
 .claude
-__pycache__/
-*.pyc
