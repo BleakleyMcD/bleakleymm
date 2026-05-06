@@ -29,6 +29,7 @@ NAS_225_USER="medialab"
 TMUX_SESSION="rsync"
 REMOTE_RSYNC_SCRIPT="/root/rsync_run.sh"
 REMOTE_QUEUE_DIR="/mnt/ssd_raid/ssd_raid/_rsync_admin/queue_history"
+REMOTE_LOG_DIR="/mnt/ssd_raid/ssd_raid/_rsync_admin/rsync_logs"
 
 # Share-to-path lookup table.
 # Format: "<server-ip>|<share-name>|<server-path>"
@@ -101,6 +102,13 @@ ${BOLD}${BLUE}WORKFLOW${RESET}
   5. Auto-attaches to the remote tmux; Ctrl+B then D detaches without stopping
      the transfer. Reattach with:
         ${DIM}ssh ${NAS_220_USER}@${NAS_220} 'tmux attach -t ${TMUX_SESSION}'${RESET}
+
+${BOLD}${BLUE}OUTPUT FILES${RESET}
+  Each batch produces three files in ${YELLOW}${REMOTE_LOG_DIR}${RESET}:
+    ${CYAN}.log${RESET}          rsync output + header/footer with throughput summary
+    ${CYAN}.context.txt${RESET}  one-time system snapshot (NIC, pool, ZFS, ping/MTU, SSH cipher)
+    ${CYAN}.metrics.tsv${RESET}  per-15s samples (NIC, pool, CPU) — load in any spreadsheet
+                  to see when throughput dipped during the run
 
 ${BOLD}${BLUE}PATH TRANSLATION${RESET}
   Mac SMB mount paths (${YELLOW}/Volumes/<share>/...${RESET}) are translated to server-side
@@ -447,6 +455,12 @@ launch_queue() {
     ok "Started."
 
     say ""
+    info "Each batch will produce three files in ${REMOTE_LOG_DIR}:"
+    info "  <ts>-<MODE>-<src>-to-<dst>.log          rsync output + summary"
+    info "  <ts>-<MODE>-<src>-to-<dst>.context.txt  one-time system snapshot"
+    info "  <ts>-<MODE>-<src>-to-<dst>.metrics.tsv  per-15s samples (NIC/pool/CPU)"
+    info "The .metrics.tsv file is the diagnostic for speed drops."
+    say ""
     info "Attaching to tmux session. Detach with Ctrl+B then D — transfer keeps running."
     info "Reattach later with: ssh ${NAS_220_USER}@${NAS_220} 'tmux attach -t ${TMUX_SESSION}'"
     say ""
@@ -454,6 +468,19 @@ launch_queue() {
     # No exec — caller continues after the tmux session ends so we can
     # offer dry-run → live re-run without rebuilding the queue.
     ssh -t "${NAS_220_USER}@${NAS_220}" "tmux attach -t '${TMUX_SESSION}'"
+
+    # After tmux ends, show files this queue produced. Use the uploaded batch
+    # script as the reference for `find -newer` so we get exactly the files
+    # written during this run (.log, .context.txt, .metrics.tsv per batch).
+    say ""
+    hdr "Files produced by this queue (under ${REMOTE_LOG_DIR}):"
+    ssh "${NAS_220_USER}@${NAS_220}" \
+        "find '${REMOTE_LOG_DIR}' -type f -newer '${batch_script}' 2>/dev/null | sort" \
+        | while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            printf "  %s\n" "$f"
+        done
+    say ""
     return 0
 }
 
