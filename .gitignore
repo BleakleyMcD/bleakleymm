@@ -1,5 +1,17 @@
-
+# macOS
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Logs and local configs
 *.log
 *.conf
-.claude
+
+# Claude / agent state
+.claude/
