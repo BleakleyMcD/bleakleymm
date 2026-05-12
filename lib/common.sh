@@ -1,55 +1,55 @@
-#!/usr/bin/env bash
-# common.sh - shared helpers for bleakleymm scripts.
-# Sourced by transcode.sh, fixity.sh, metadata.sh, package.sh, validate.sh, rawcooked.sh.
+# Shared helpers for bleakleymm TBM workflows. Source, don't execute.
 
-# Suffixes that mark a file as a sidecar / generated output rather than a source.
-# Scripts iterating a directory skip files matching these to avoid re-processing
-# previously-generated artifacts.
-TBM_SIDECAR_SUFFIXES=(
-    .access.mp4
-    .mediainfo.txt
-    .mediainfo.json
-    .mediatrace.xml
-    .md5.txt
-    .sha1.txt
-    .sha256.txt
-    .sha512.txt
-    .crc32.txt
-    .framemd5
-    .log
-)
-
-# Color codes — empty if stderr isn't a TTY (e.g. piped to a log file).
-if [[ -t 2 ]]; then
-    _TBM_RED=$'\033[31m'
-    _TBM_YELLOW=$'\033[33m'
-    _TBM_GREEN=$'\033[32m'
-    _TBM_CYAN=$'\033[36m'
-    _TBM_RESET=$'\033[0m'
-else
-    _TBM_RED=''
-    _TBM_YELLOW=''
-    _TBM_GREEN=''
-    _TBM_CYAN=''
-    _TBM_RESET=''
-fi
-
-# Leveled logging — all to stderr so script stdout stays clean for piping.
-tbm_error() { printf '%s[error]%s %s\n' "${_TBM_RED}"    "${_TBM_RESET}" "$*" >&2; }
-tbm_warn()  { printf '%s[warn]%s  %s\n' "${_TBM_YELLOW}" "${_TBM_RESET}" "$*" >&2; }
-tbm_info()  { printf '%s[info]%s  %s\n' "${_TBM_CYAN}"   "${_TBM_RESET}" "$*" >&2; }
-tbm_ok()    { printf '%s[ok]%s    %s\n' "${_TBM_GREEN}"  "${_TBM_RESET}" "$*" >&2; }
-
-# Assert a command exists on PATH; exit 127 if not.
-tbm_require() {
-    local cmd="$1"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        tbm_error "required tool not found: $cmd"
-        exit 127
-    fi
+_tbm_color() {
+    if [[ ! -t 1 ]]; then shift; printf '%s\n' "$*"; return; fi
+    local c="$1"; shift
+    case "$c" in
+        red)    printf '\033[31m%s\033[0m\n' "$*" ;;
+        green)  printf '\033[32m%s\033[0m\n' "$*" ;;
+        yellow) printf '\033[33m%s\033[0m\n' "$*" ;;
+        blue)   printf '\033[34m%s\033[0m\n' "$*" ;;
+        *)      printf '%s\n' "$*" ;;
+    esac
 }
 
-# Install a SIGTERM handler that exits cleanly (status 143).
-tbm_trap_sigterm() {
-    trap 'tbm_warn "terminated"; exit 143' TERM
+tbm_info()  { _tbm_color blue   "[$(date +%FT%T)] [INFO]  $*"; }
+tbm_ok()    { _tbm_color green  "[$(date +%FT%T)] [OK]    $*"; }
+tbm_warn()  { _tbm_color yellow "[$(date +%FT%T)] [WARN]  $*" >&2; }
+tbm_error() { _tbm_color red    "[$(date +%FT%T)] [ERROR] $*" >&2; }
+
+tbm_require() {
+    local missing=0 dep
+    for dep in "$@"; do
+        command -v "$dep" >/dev/null 2>&1 || { tbm_error "Missing dependency: $dep"; missing=1; }
+    done
+    [[ $missing -eq 0 ]] || exit 1
+}
+
+tbm_require_one_of() {
+    local dep
+    for dep in "$@"; do
+        command -v "$dep" >/dev/null 2>&1 && { printf '%s\n' "$dep"; return 0; }
+    done
+    tbm_error "Missing dependency: need one of: $*"
+    exit 1
+}
+
+tbm_trap_sigterm() { trap 'tbm_error "Interrupted"; exit 130' INT TERM; }
+
+tbm_run_id() { date +%Y%m%dT%H%M%S; }
+
+# Known sidecar filename suffixes produced by tools in this repo.
+# Iteration helpers skip these so sidecars aren't reprocessed as sources.
+TBM_SIDECAR_SUFFIXES=(
+    .md5.txt .sha1.txt .sha224.txt .sha256.txt .sha384.txt .sha512.txt .crc32.txt .framemd5
+    .mediainfo.txt .mediainfo.json .mediatrace.xml .ffprobe.json .exiftool.txt .exiftool.json
+    .access.mp4
+)
+
+tbm_is_sidecar() {
+    local name="$1" suf
+    for suf in "${TBM_SIDECAR_SUFFIXES[@]}"; do
+        [[ "$name" == *"$suf" ]] && return 0
+    done
+    return 1
 }

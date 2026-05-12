@@ -1,59 +1,88 @@
-"""common.py - shared helpers for bleakleymm scripts.
-
-Imported by transcode.py, fixity.py, metadata.py, package.py, validate.py, rawcooked.py.
-"""
+"""Shared helpers for bleakleymm TBM workflows."""
 from __future__ import annotations
 
 import logging
 import shutil
 import signal
 import sys
+from datetime import datetime
+
+_COLORS = {
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "reset": "\033[0m",
+}
 
 
-# Suffixes that mark a file as a sidecar / generated output rather than a source.
-# Scripts iterating a directory skip files matching these.
-SIDECAR_SUFFIXES = (
-    ".access.mp4",
-    ".mediainfo.txt",
-    ".mediainfo.json",
-    ".mediatrace.xml",
-    ".md5.txt",
-    ".sha1.txt",
-    ".sha256.txt",
-    ".sha512.txt",
-    ".crc32.txt",
-    ".framemd5",
-    ".log",
-)
+class _ColorFormatter(logging.Formatter):
+    LEVEL_COLORS = {
+        logging.INFO: "blue",
+        logging.WARNING: "yellow",
+        logging.ERROR: "red",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        level_map = {logging.INFO: "INFO ", logging.WARNING: "WARN ", logging.ERROR: "ERROR"}
+        level = level_map.get(record.levelno, record.levelname)
+        msg = f"[{ts}] [{level}] {record.getMessage()}"
+        if sys.stdout.isatty():
+            c = self.LEVEL_COLORS.get(record.levelno)
+            if c:
+                msg = f"{_COLORS[c]}{msg}{_COLORS['reset']}"
+        return msg
 
 
 def get_logger(name: str = "tbm") -> logging.Logger:
-    """Return a stderr logger with short level-prefixed formatting."""
-    log = logging.getLogger(name)
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stderr)
-        h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-        log.addHandler(h)
-        log.setLevel(logging.INFO)
-        log.propagate = False
-    return log
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(_ColorFormatter())
+        logger.addHandler(h)
+        logger.setLevel(logging.INFO)
+    return logger
+
+
+def require(*deps: str) -> None:
+    log = get_logger()
+    missing = [d for d in deps if shutil.which(d) is None]
+    if missing:
+        for d in missing:
+            log.error(f"Missing dependency: {d}")
+        sys.exit(1)
+
+
+def require_one_of(*deps: str) -> str:
+    for d in deps:
+        if shutil.which(d):
+            return d
+    get_logger().error(f"Missing dependency: need one of: {', '.join(deps)}")
+    sys.exit(1)
 
 
 def install_sigterm_trap() -> None:
-    """Exit cleanly (status 143) on SIGTERM."""
-    def _on_term(_signum, _frame):
-        get_logger().warning("terminated")
-        sys.exit(143)
-    signal.signal(signal.SIGTERM, _on_term)
+    def _handler(signum, frame):
+        get_logger().error("Interrupted")
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+
+
+def run_id() -> str:
+    return datetime.now().strftime("%Y%m%dT%H%M%S")
+
+
+TBM_SIDECAR_SUFFIXES = (
+    ".md5.txt", ".sha1.txt", ".sha224.txt", ".sha256.txt",
+    ".sha384.txt", ".sha512.txt", ".crc32.txt", ".framemd5",
+    ".mediainfo.txt", ".mediainfo.json", ".mediatrace.xml",
+    ".ffprobe.json", ".exiftool.txt", ".exiftool.json",
+    ".access.mp4",
+)
 
 
 def is_sidecar(name: str) -> bool:
-    """True if filename ends with a known sidecar/output suffix."""
-    return name.endswith(SIDECAR_SUFFIXES)
-
-
-def require(cmd: str) -> None:
-    """Assert a command exists on PATH; exit 127 if not."""
-    if shutil.which(cmd) is None:
-        get_logger().error(f"required tool not found: {cmd}")
-        sys.exit(127)
+    return any(name.endswith(s) for s in TBM_SIDECAR_SUFFIXES)
