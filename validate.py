@@ -7,12 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from common import get_logger, install_sigterm_trap, is_sidecar, require  # noqa: E402
 
 log = get_logger()
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_POLICY = REPO_ROOT / "policies" / "default.xml"
 
 if sys.stdout.isatty():
