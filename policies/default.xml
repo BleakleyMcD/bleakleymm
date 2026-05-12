@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<policy type="and" name="TBM Default" license="CC-BY-SA-4.0+">
+  <description>Bundled default policy for the bleakleymm validate tool. Passes any file MediaInfo can parse — an intentionally loose placeholder. WARNING: in practice this passes effectively any file (including zero-byte ones) because MediaConch's "exists" operator is lenient. Rely on the ffprobe parse check for real rejection, and replace this policy with a format-specific one via --policy for actual preservation validation.</description>
+  <rule name="General/Format exists" value="" tracktype="General" occurrence="1" operator="exists">Format</rule>
+</policy>
