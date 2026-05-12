@@ -28,7 +28,6 @@ else:
 
 SEP = "═" * 63
 DSEP = "─" * 63
-DPX_SEQ_RE = re.compile(r"(\d+)\.dpx$", re.IGNORECASE)
 ET = ZoneInfo("America/New_York")
 
 FORMAT_TOKENS = {
@@ -185,32 +184,84 @@ def decode_format(raw: str) -> str:
     return ", ".join(parts)
 
 
+def derive_dpx_pattern(name: str) -> tuple[str, int, str] | None:
+    """Derive (prefix, width, ext) from a DPX filename, or None if it doesn't fit
+    the <prefix><digits>.dpx shape. Extension keeps its original case."""
+    if not name.lower().endswith(".dpx"):
+        return None
+    base, _, ext = name.rpartition(".")
+    i = len(base)
+    while i > 0 and base[i - 1].isdigit():
+        i -= 1
+    digits = base[i:]
+    if not digits:
+        return None
+    return base[:i], len(digits), ext
+
+
+def check_dpx_name(name: str, prefix: str, width: int) -> bool:
+    """True if filename matches (prefix, width) DPX pattern. Extension is
+    case-insensitive against .dpx; prefix must match exactly."""
+    if not name.lower().endswith(".dpx"):
+        return False
+    base = name.rpartition(".")[0]
+    if not base.startswith(prefix):
+        return False
+    seq = base[len(prefix):]
+    return len(seq) == width and seq.isdigit()
+
+
 def analyze_dpx_sequence(directory: Path) -> dict:
     files = sorted(p for p in directory.iterdir()
                    if p.is_file() and p.suffix.lower() == ".dpx")
-    out = {"files": files, "count": len(files), "first_name": "", "last_name": "",
-           "first_num": "", "last_num": "", "missing": []}
+    out = {
+        "files": files, "count": len(files),
+        "first_name": "", "last_name": "",
+        "first_num": "", "last_num": "",
+        "missing": [], "mismatches": [],
+        "pattern_prefix": "", "pattern_width": 0, "pattern_ext": "",
+        "pattern_display": "", "pattern_error": "",
+    }
     if not files:
         return out
-    out["first_name"] = files[0].name
-    out["last_name"] = files[-1].name
 
-    def seq_num(name: str) -> str:
-        m = DPX_SEQ_RE.search(name)
-        return m.group(1) if m else ""
+    pat = derive_dpx_pattern(files[0].name)
+    if pat is None:
+        out["pattern_error"] = "first file does not match the <prefix><digits>.dpx shape"
+        out["first_name"] = files[0].name
+        return out
 
-    out["first_num"] = seq_num(files[0].name)
-    out["last_num"] = seq_num(files[-1].name)
-    if out["first_num"] and out["last_num"]:
-        pad = len(out["first_num"])
-        first_i, last_i = int(out["first_num"]), int(out["last_num"])
-        existing = {seq_num(f.name) for f in files}
-        out["missing"] = [f"{i:0{pad}d}" for i in range(first_i, last_i + 1)
-                          if f"{i:0{pad}d}" not in existing]
+    prefix, width, ext = pat
+    out["pattern_prefix"] = prefix
+    out["pattern_width"] = width
+    out["pattern_ext"] = ext
+    out["pattern_display"] = f"{prefix}{'N' * width}.{ext}"
+
+    seq_numbers: list[str] = []
+    for f in files:
+        if check_dpx_name(f.name, prefix, width):
+            base = f.name.rpartition(".")[0]
+            seq_numbers.append(base[len(prefix):])
+        else:
+            out["mismatches"].append(f.name)
+
+    if seq_numbers:
+        out["first_num"] = seq_numbers[0]
+        out["last_num"] = seq_numbers[-1]
+        # Reconstruct first/last names from pattern so a stray mismatch at the
+        # alphabetic edge doesn't masquerade as the sequence's first or last frame.
+        out["first_name"] = f"{prefix}{seq_numbers[0]}.{ext}"
+        out["last_name"] = f"{prefix}{seq_numbers[-1]}.{ext}"
+        first_i, last_i = int(seq_numbers[0]), int(seq_numbers[-1])
+        existing = set(seq_numbers)
+        out["missing"] = [f"{i:0{width}d}" for i in range(first_i, last_i + 1)
+                          if f"{i:0{width}d}" not in existing]
     return out
 
 
-def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> None:
+def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> int:
+    """Render banner, write log header, validate DPX naming. Returns 0 normally;
+    returns 3 if encode-mode naming inconsistencies were detected (caller aborts)."""
     seq = (analyze_dpx_sequence(input_path)
            if mode == "encode" and input_path.is_dir() else None)
     mode_upper = mode.upper()
@@ -229,8 +280,19 @@ def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> None
         if not seq or seq["count"] == 0:
             print(f"    {YELLOW}(no .dpx files found at top level — rawcooked will probe further){RESET}",
                   file=sys.stderr)
+        elif seq["pattern_error"]:
+            print(f"    {RED}ERROR:{RESET}    {seq['pattern_error']}", file=sys.stderr)
+            print(f"    First:    {seq['first_name']}", file=sys.stderr)
         else:
-            print(f"    Found:    {seq['count']} frames", file=sys.stderr)
+            mismatches = seq["mismatches"]
+            print(f"    Pattern:  {seq['pattern_display']} ({seq['pattern_width']}-digit sequence)",
+                  file=sys.stderr)
+            if not mismatches:
+                print(f"    Found:    {seq['count']} frames", file=sys.stderr)
+            else:
+                print(f"    Found:    {seq['count']} .dpx total "
+                      f"({GREEN}{seq['count'] - len(mismatches)} match pattern{RESET}, "
+                      f"{RED}{len(mismatches)} do not{RESET})", file=sys.stderr)
             print(f"    First:    {seq['first_name']}", file=sys.stderr)
             print(f"    Last:     {seq['last_name']}", file=sys.stderr)
             if seq["first_num"]:
@@ -241,6 +303,14 @@ def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> None
                 else:
                     print(f"    Range:    {seq['first_num']} → {seq['last_num']}  "
                           f"{YELLOW}({missing_n} missing — listed in log){RESET}", file=sys.stderr)
+            if mismatches:
+                print(f"    {RED}Mismatches:{RESET}  {RED}{len(mismatches)} files do not match pattern{RESET}",
+                      file=sys.stderr)
+                for mm in mismatches[:5]:
+                    print(f"      {RED}{mm}{RESET}", file=sys.stderr)
+                if len(mismatches) > 5:
+                    print(f"      {DIM}… ({len(mismatches) - 5} more — full list in log){RESET}",
+                          file=sys.stderr)
     print(file=sys.stderr)
     print(f"  {CYAN}Defaults:{RESET} --all (check, conch, hash, coherency, framemd5, accept-gaps)",
           file=sys.stderr)
@@ -263,8 +333,14 @@ def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> None
             if not seq or seq["count"] == 0:
                 fh.write("No .dpx files found at the top level of the input directory.\n")
                 fh.write("(RAWcooked may still probe subdirs.)\n")
+            elif seq["pattern_error"]:
+                fh.write(f"ERROR:     {seq['pattern_error']}\n")
+                fh.write(f"First:     {seq['first_name']}\n")
             else:
-                fh.write(f"Found:     {seq['count']} frames\n")
+                mismatches = seq["mismatches"]
+                fh.write(f"Pattern:   {seq['pattern_display']} ({seq['pattern_width']}-digit sequence)\n")
+                fh.write(f"Found:     {seq['count']} frames total "
+                         f"({seq['count'] - len(mismatches)} match pattern, {len(mismatches)} mismatched)\n")
                 fh.write(f"First:     {seq['first_name']}\n")
                 fh.write(f"Last:      {seq['last_name']}\n")
                 if seq["first_num"]:
@@ -282,9 +358,19 @@ def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> None
                     fh.write(f"\nMissing frames ({len(seq['missing'])}):\n")
                     for m in seq["missing"]:
                         fh.write(f"  {m}\n")
+                if mismatches:
+                    fh.write(f"\nNaming mismatches ({len(mismatches)}):\n")
+                    for mm in mismatches:
+                        fh.write(f"  {mm}\n")
             fh.write("\n")
         fh.write("RAWcooked Output\n")
         fh.write("-" * 16 + "\n")
+
+    # Signal abort if encode-mode naming inconsistencies were detected.
+    if mode == "encode" and seq:
+        if seq.get("pattern_error") or seq.get("mismatches"):
+            return 3
+    return 0
 
 
 def tech_summary(log_path: Path, framerate_source: str) -> None:
@@ -615,7 +701,12 @@ def main() -> int:
     if mode == "encode":
         framerate_source = probe_framerate_source(in_path)
 
-    preflight(mode, in_path, output, log_path)
+    preflight_status = preflight(mode, in_path, output, log_path)
+    if preflight_status != 0:
+        log.error("Aborting: DPX naming inconsistencies detected in input dir.")
+        log.error("Every .dpx file must follow the pattern derived from the first file.")
+        log.error(f"See pre-flight output above (and {log_path}) for the full list.")
+        return 3
 
     start = time.time()
     start_et = now_et()

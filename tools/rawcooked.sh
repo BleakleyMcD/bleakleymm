@@ -116,6 +116,43 @@ _probe_framerate_source() {
     fi
 }
 
+# Derive a (prefix, width, ext) DPX naming pattern from a single filename.
+# Returns 0 and sets DPX_PATTERN_{PREFIX,WIDTH,EXT} globals on success;
+# returns 1 if the name doesn't fit the "<prefix><digits>.dpx" shape.
+# Uses globals instead of stdout because the prefix can be empty and a
+# tab-separated read with leading empty field is awkward in bash.
+_derive_dpx_pattern() {
+    local name="$1"
+    local lower="${name,,}"
+    [[ "$lower" == *.dpx ]] || return 1
+    local base="${name%.*}" ext="${name##*.}"
+    local digits="" i=${#base} c
+    while (( i > 0 )); do
+        c="${base:i-1:1}"
+        case "$c" in
+            [0-9]) digits="$c$digits"; i=$((i - 1)) ;;
+            *) break ;;
+        esac
+    done
+    [[ -n "$digits" ]] || return 1
+    DPX_PATTERN_PREFIX="${base:0:$i}"
+    DPX_PATTERN_WIDTH="${#digits}"
+    DPX_PATTERN_EXT="$ext"
+}
+
+# True if a filename matches the (prefix, width) DPX pattern. Extension is
+# checked case-insensitively against .dpx; prefix must match exactly.
+_check_dpx_name() {
+    local name="$1" prefix="$2" width="$3"
+    local lower="${name,,}"
+    [[ "$lower" == *.dpx ]] || return 1
+    local base="${name%.*}"
+    [[ "${base:0:${#prefix}}" == "$prefix" ]] || return 1
+    local seq="${base:${#prefix}}"
+    (( ${#seq} == width )) || return 1
+    [[ "$seq" =~ ^[0-9]+$ ]]
+}
+
 # Decode rawcooked's source-format shorthand (e.g. "DPX/Raw/RGB/10bit/U/BE/FilledA")
 # into a plain-English, comma-separated description.
 _decode_format() {
@@ -165,7 +202,9 @@ _preflight() {
 
     local -a files=()
     local count=0 first_name="" last_name="" first_num="" last_num="" missing_count=0
-    local -a missing=()
+    local -a missing=() mismatches=()
+    local pattern_prefix="" pattern_width="" pattern_ext="" pattern_display=""
+    local pattern_error=""
 
     if [[ "$mode" == "encode" && -d "$input" ]]; then
         mapfile -t files < <(find "$input" -maxdepth 1 -type f \( -iname '*.dpx' \) -print 2>/dev/null | sort)
@@ -173,21 +212,52 @@ _preflight() {
         if (( count > 0 )); then
             first_name="${files[0]##*/}"
             last_name="${files[-1]##*/}"
-            first_num=$(sed -nE -e 's/^([0-9]+)\.[dD][pP][xX]$/\1/p' -e 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' <<< "$first_name")
-            last_num=$(sed -nE -e 's/^([0-9]+)\.[dD][pP][xX]$/\1/p' -e 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' <<< "$last_name")
-            if [[ -n "$first_num" && -n "$last_num" ]]; then
-                local expected=$((10#$last_num - 10#$first_num + 1))
-                missing_count=$((expected - count))
-                if (( missing_count > 0 )); then
-                    local pad=${#first_num}
-                    local existing
-                    existing=$(printf '%s\n' "${files[@]##*/}" \
-                        | sed -nE -e 's/^([0-9]+)\.[dD][pP][xX]$/\1/p' -e 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' | sort -u)
-                    local i seq
-                    for ((i=10#$first_num; i<=10#$last_num; i++)); do
-                        printf -v seq "%0${pad}d" "$i"
-                        grep -qE "^${seq}$" <<< "$existing" || missing+=("$seq")
-                    done
+
+            # Derive the naming pattern from the first DPX in the stack.
+            if ! _derive_dpx_pattern "$first_name"; then
+                pattern_error="first file does not match the <prefix><digits>.dpx shape"
+            else
+                pattern_prefix="$DPX_PATTERN_PREFIX"
+                pattern_width="$DPX_PATTERN_WIDTH"
+                pattern_ext="$DPX_PATTERN_EXT"
+                local _N
+                printf -v _N '%*s' "$pattern_width" ''
+                _N="${_N// /N}"
+                pattern_display="${pattern_prefix}${_N}.${pattern_ext}"
+
+                # Validate every file against the derived pattern; collect sequence numbers.
+                local -a seq_numbers=()
+                local f fname seq
+                for f in "${files[@]}"; do
+                    fname="${f##*/}"
+                    if _check_dpx_name "$fname" "$pattern_prefix" "$pattern_width"; then
+                        local _b="${fname%.*}"
+                        seq_numbers+=("${_b:${#pattern_prefix}}")
+                    else
+                        mismatches+=("$fname")
+                    fi
+                done
+
+                # Range + gap detection over the sequence numbers (already file-sorted).
+                if (( ${#seq_numbers[@]} > 0 )); then
+                    first_num="${seq_numbers[0]}"
+                    last_num="${seq_numbers[-1]}"
+                    # Re-derive first/last names from the pattern + matching seq numbers
+                    # so a stray mismatch file at the alphabetic edge doesn't masquerade
+                    # as the sequence's first or last frame.
+                    first_name="${pattern_prefix}${first_num}.${pattern_ext}"
+                    last_name="${pattern_prefix}${last_num}.${pattern_ext}"
+                    local expected=$((10#$last_num - 10#$first_num + 1))
+                    missing_count=$((expected - ${#seq_numbers[@]}))
+                    if (( missing_count > 0 )); then
+                        local seq_list
+                        seq_list=$(printf '%s\n' "${seq_numbers[@]}")
+                        local i
+                        for ((i=10#$first_num; i<=10#$last_num; i++)); do
+                            printf -v seq "%0${pattern_width}d" "$i"
+                            grep -qFx "$seq" <<< "$seq_list" || missing+=("$seq")
+                        done
+                    fi
                 fi
             fi
         fi
@@ -209,8 +279,18 @@ _preflight() {
             printf '  %sDPX sequence:%s\n' "${CYAN}" "${RESET}"
             if (( count == 0 )); then
                 printf '    %s(no .dpx files found at top level — rawcooked will probe further)%s\n' "${YELLOW}" "${RESET}"
+            elif [[ -n "$pattern_error" ]]; then
+                printf '    %sERROR:%s    %s\n' "${RED}" "${RESET}" "$pattern_error"
+                printf '    First:    %s\n' "$first_name"
             else
-                printf '    Found:    %s frames\n' "$count"
+                printf '    Pattern:  %s (%s-digit sequence)\n' "$pattern_display" "$pattern_width"
+                if (( ${#mismatches[@]} == 0 )); then
+                    printf '    Found:    %s frames\n' "$count"
+                else
+                    printf '    Found:    %s .dpx total (%s%s match pattern%s, %s%s do not%s)\n' \
+                        "$count" "${GREEN}" "$((count - ${#mismatches[@]}))" "${RESET}" \
+                        "${RED}" "${#mismatches[@]}" "${RESET}"
+                fi
                 printf '    First:    %s\n' "$first_name"
                 printf '    Last:     %s\n' "$last_name"
                 if [[ -n "$first_num" ]]; then
@@ -219,6 +299,18 @@ _preflight() {
                     else
                         printf '    Range:    %s → %s  %s(%s missing — listed in log)%s\n' \
                             "$first_num" "$last_num" "${YELLOW}" "$missing_count" "${RESET}"
+                    fi
+                fi
+                if (( ${#mismatches[@]} > 0 )); then
+                    printf '    %sMismatches:%s  %s%s files do not match pattern%s\n' \
+                        "${RED}" "${RESET}" "${RED}" "${#mismatches[@]}" "${RESET}"
+                    local _mm_show=$(( ${#mismatches[@]} < 5 ? ${#mismatches[@]} : 5 ))
+                    local _mm_i
+                    for ((_mm_i=0; _mm_i<_mm_show; _mm_i++)); do
+                        printf '      %s%s%s\n' "${RED}" "${mismatches[_mm_i]}" "${RESET}"
+                    done
+                    if (( ${#mismatches[@]} > 5 )); then
+                        printf '      %s… (%s more — full list in log)%s\n' "${DIM}" $((${#mismatches[@]} - 5)) "${RESET}"
                     fi
                 fi
             fi
@@ -246,8 +338,12 @@ _preflight() {
             if (( count == 0 )); then
                 echo "No .dpx files found at the top level of the input directory."
                 echo "(RAWcooked may still probe subdirs.)"
+            elif [[ -n "$pattern_error" ]]; then
+                echo "ERROR:     $pattern_error"
+                echo "First:     $first_name"
             else
-                echo "Found:     $count frames"
+                echo "Pattern:   $pattern_display ($pattern_width-digit sequence)"
+                echo "Found:     $count frames total ($((count - ${#mismatches[@]})) match pattern, ${#mismatches[@]} mismatched)"
                 echo "First:     $first_name"
                 echo "Last:      $last_name"
                 if [[ -n "$first_num" ]]; then
@@ -274,12 +370,26 @@ _preflight() {
                     local m
                     for m in "${missing[@]}"; do printf '  %s\n' "$m"; done
                 fi
+                if (( ${#mismatches[@]} > 0 )); then
+                    echo ""
+                    echo "Naming mismatches (${#mismatches[@]}):"
+                    local mm
+                    for mm in "${mismatches[@]}"; do printf '  %s\n' "$mm"; done
+                fi
             fi
             echo ""
         fi
         echo "RAWcooked Output"
         echo "----------------"
     } > "$log"
+
+    # If naming inconsistencies were found in encode mode, signal abort.
+    if [[ "$mode" == "encode" ]]; then
+        if [[ -n "$pattern_error" ]] || (( ${#mismatches[@]} > 0 )); then
+            return 3
+        fi
+    fi
+    return 0
 }
 
 # Technical Summary (encode only) — parses captured output, emits plain-English
@@ -600,7 +710,14 @@ main() {
         framerate_source=$(_probe_framerate_source "$input")
     fi
 
-    _preflight "$mode" "$input" "$output" "$log"
+    local preflight_status=0
+    _preflight "$mode" "$input" "$output" "$log" || preflight_status=$?
+    if (( preflight_status != 0 )); then
+        tbm_error "Aborting: DPX naming inconsistencies detected in input dir."
+        tbm_error "Every .dpx file must follow the pattern derived from the first file."
+        tbm_error "See pre-flight output above (and $log) for the full list."
+        return 3
+    fi
 
     local start_t end_t status start_et end_et
     start_t=$(date +%s)
