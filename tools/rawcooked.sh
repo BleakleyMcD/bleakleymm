@@ -173,8 +173,8 @@ _preflight() {
         if (( count > 0 )); then
             first_name="${files[0]##*/}"
             last_name="${files[-1]##*/}"
-            first_num=$(sed -nE 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' <<< "$first_name")
-            last_num=$(sed -nE 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' <<< "$last_name")
+            first_num=$(sed -nE -e 's/^([0-9]+)\.[dD][pP][xX]$/\1/p' -e 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' <<< "$first_name")
+            last_num=$(sed -nE -e 's/^([0-9]+)\.[dD][pP][xX]$/\1/p' -e 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' <<< "$last_name")
             if [[ -n "$first_num" && -n "$last_num" ]]; then
                 local expected=$((10#$last_num - 10#$first_num + 1))
                 missing_count=$((expected - count))
@@ -182,7 +182,7 @@ _preflight() {
                     local pad=${#first_num}
                     local existing
                     existing=$(printf '%s\n' "${files[@]##*/}" \
-                        | sed -nE 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' | sort -u)
+                        | sed -nE -e 's/^([0-9]+)\.[dD][pP][xX]$/\1/p' -e 's/.*[^0-9]([0-9]+)\.[dD][pP][xX]$/\1/p' | sort -u)
                     local i seq
                     for ((i=10#$first_num; i<=10#$last_num; i++)); do
                         printf -v seq "%0${pad}d" "$i"
@@ -325,10 +325,20 @@ _tech_summary() {
         content_pretty="$duration_str"
     fi
 
-    local realtime_line throughput speed_x
-    realtime_line=$(grep -E 'realtime' "$log" 2>/dev/null | tail -1 || true)
-    throughput=$(grep -oE '[0-9.]+ MiB/s' <<< "$realtime_line" | head -1)
-    speed_x=$(grep -oE '[0-9.]+x realtime' <<< "$realtime_line" | head -1)
+    # Encode speed (ffmpeg pass): from the final "frame=... speed=N.Nx ..." line.
+    local encode_speed
+    encode_speed=$(grep -oE 'speed=[[:space:]]*[0-9.]+x' <<< "$progress_line" | grep -oE '[0-9.]+x' || true)
+
+    # Check speed (reversibility pass): from the final rawcooked "Time=..." progress line.
+    local check_line check_speed
+    check_line=$(grep -E '^Time=' "$log" 2>/dev/null | tail -1 || true)
+    check_speed=$(grep -oE '[0-9.]+x realtime' <<< "$check_line" | head -1 || true)
+
+    # Overall throughput: rawcooked's final "N.N MiB/s, N.NNx realtime" line (not the Time= ones).
+    local overall_line overall_throughput overall_speed
+    overall_line=$(grep -E 'realtime' "$log" 2>/dev/null | grep -v '^Time=' | tail -1 || true)
+    overall_throughput=$(grep -oE '[0-9.]+ MiB/s' <<< "$overall_line" | head -1 || true)
+    overall_speed=$(grep -oE '[0-9.]+x realtime' <<< "$overall_line" | head -1 || true)
 
     local rev_color rev_plain hashes_color hashes_plain
     if grep -q 'Reversibility was checked, no issue detected' "$log" 2>/dev/null; then
@@ -374,10 +384,12 @@ _tech_summary() {
             && printf '  %sContent length:%s   %s (%s frames @ %s fps)\n' "${CYAN}" "${RESET}" "$content_pretty" "$fc_pretty" "$fps"
         [[ -n "$output_size" ]]   && printf '  %sOutput size:%s      %s\n' "${CYAN}" "${RESET}" "$output_size"
         [[ -n "$bitrate_mbps" ]]  && printf '  %sOutput bitrate:%s   ~%s Mbps\n' "${CYAN}" "${RESET}" "$bitrate_mbps"
-        if [[ -n "$speed_x" && -n "$throughput" ]]; then
-            printf '  %sEncode speed:%s     %s (%s)\n' "${CYAN}" "${RESET}" "$speed_x" "$throughput"
-        elif [[ -n "$speed_x" ]]; then
-            printf '  %sEncode speed:%s     %s\n' "${CYAN}" "${RESET}" "$speed_x"
+        [[ -n "$encode_speed" ]] && printf '  %sEncode speed:%s     %s realtime (ffmpeg pass)\n' "${CYAN}" "${RESET}" "$encode_speed"
+        [[ -n "$check_speed" ]]  && printf '  %sCheck speed:%s      %s (reversibility pass)\n' "${CYAN}" "${RESET}" "$check_speed"
+        if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
+            printf '  %sOverall:%s          %s (%s)\n' "${CYAN}" "${RESET}" "$overall_speed" "$overall_throughput"
+        elif [[ -n "$overall_speed" ]]; then
+            printf '  %sOverall:%s          %s\n' "${CYAN}" "${RESET}" "$overall_speed"
         fi
         printf '  %sReversibility:%s    %s\n' "${CYAN}" "${RESET}" "$rev_color"
         printf '  %sFile hashes:%s      %s\n' "${CYAN}" "${RESET}" "$hashes_color"
@@ -400,10 +412,12 @@ _tech_summary() {
             && echo "Content length:   $content_pretty ($fc_pretty frames @ $fps fps)"
         [[ -n "$output_size" ]]   && echo "Output size:      $output_size"
         [[ -n "$bitrate_mbps" ]]  && echo "Output bitrate:   ~$bitrate_mbps Mbps"
-        if [[ -n "$speed_x" && -n "$throughput" ]]; then
-            echo "Encode speed:     $speed_x ($throughput)"
-        elif [[ -n "$speed_x" ]]; then
-            echo "Encode speed:     $speed_x"
+        [[ -n "$encode_speed" ]] && echo "Encode speed:     $encode_speed realtime (ffmpeg pass)"
+        [[ -n "$check_speed" ]]  && echo "Check speed:      $check_speed (reversibility pass)"
+        if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
+            echo "Overall:          $overall_speed ($overall_throughput)"
+        elif [[ -n "$overall_speed" ]]; then
+            echo "Overall:          $overall_speed"
         fi
         echo "Reversibility:    $rev_plain"
         echo "File hashes:      $hashes_plain"

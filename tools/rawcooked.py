@@ -28,7 +28,7 @@ else:
 
 SEP = "═" * 63
 DSEP = "─" * 63
-DPX_SEQ_RE = re.compile(r".*[^0-9](\d+)\.dpx$", re.IGNORECASE)
+DPX_SEQ_RE = re.compile(r"(\d+)\.dpx$", re.IGNORECASE)
 ET = ZoneInfo("America/New_York")
 
 FORMAT_TOKENS = {
@@ -196,7 +196,7 @@ def analyze_dpx_sequence(directory: Path) -> dict:
     out["last_name"] = files[-1].name
 
     def seq_num(name: str) -> str:
-        m = DPX_SEQ_RE.match(name)
+        m = DPX_SEQ_RE.search(name)
         return m.group(1) if m else ""
 
     out["first_num"] = seq_num(files[0].name)
@@ -332,12 +332,24 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
     else:
         content_pretty = ""
 
-    rt_lines = re.findall(r".*realtime.*", text)
-    rt = rt_lines[-1] if rt_lines else ""
-    tp_m = re.search(r"([\d.]+ MiB/s)", rt)
-    throughput = tp_m.group(1) if tp_m else ""
-    sp_m = re.search(r"([\d.]+x realtime)", rt)
-    speed_x = sp_m.group(1) if sp_m else ""
+    # Encode speed (ffmpeg pass): from the final "frame=... speed=N.Nx" line.
+    enc_m = re.search(r"speed=\s*([\d.]+x)", progress)
+    encode_speed = enc_m.group(1) if enc_m else ""
+
+    # Check speed (reversibility pass): from the final rawcooked "Time=..." progress line.
+    time_lines = re.findall(r"^Time=.*$", text, re.MULTILINE)
+    check_line = time_lines[-1] if time_lines else ""
+    chk_m = re.search(r"([\d.]+x realtime)", check_line)
+    check_speed = chk_m.group(1) if chk_m else ""
+
+    # Overall throughput: rawcooked's final "N.N MiB/s, N.NNx realtime" line (not the Time= lines).
+    overall_lines = [ln for ln in re.findall(r".*realtime.*", text)
+                     if not ln.startswith("Time=")]
+    overall_line = overall_lines[-1] if overall_lines else ""
+    tp_m = re.search(r"([\d.]+ MiB/s)", overall_line)
+    overall_throughput = tp_m.group(1) if tp_m else ""
+    ov_m = re.search(r"([\d.]+x realtime)", overall_line)
+    overall_speed = ov_m.group(1) if ov_m else ""
 
     if "Reversibility was checked, no issue detected" in text:
         rev_color = f"{GREEN}✓ checked, no issues detected{RESET}"
@@ -385,10 +397,14 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
         print(f"  {CYAN}Output size:{RESET}      {output_size}", file=sys.stderr)
     if bitrate_mbps:
         print(f"  {CYAN}Output bitrate:{RESET}   ~{bitrate_mbps} Mbps", file=sys.stderr)
-    if speed_x and throughput:
-        print(f"  {CYAN}Encode speed:{RESET}     {speed_x} ({throughput})", file=sys.stderr)
-    elif speed_x:
-        print(f"  {CYAN}Encode speed:{RESET}     {speed_x}", file=sys.stderr)
+    if encode_speed:
+        print(f"  {CYAN}Encode speed:{RESET}     {encode_speed} realtime (ffmpeg pass)", file=sys.stderr)
+    if check_speed:
+        print(f"  {CYAN}Check speed:{RESET}      {check_speed} (reversibility pass)", file=sys.stderr)
+    if overall_speed and overall_throughput:
+        print(f"  {CYAN}Overall:{RESET}          {overall_speed} ({overall_throughput})", file=sys.stderr)
+    elif overall_speed:
+        print(f"  {CYAN}Overall:{RESET}          {overall_speed}", file=sys.stderr)
     print(f"  {CYAN}Reversibility:{RESET}    {rev_color}", file=sys.stderr)
     print(f"  {CYAN}File hashes:{RESET}      {hashes_color}", file=sys.stderr)
     if md5:
@@ -416,10 +432,14 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
             fh.write(f"Output size:      {output_size}\n")
         if bitrate_mbps:
             fh.write(f"Output bitrate:   ~{bitrate_mbps} Mbps\n")
-        if speed_x and throughput:
-            fh.write(f"Encode speed:     {speed_x} ({throughput})\n")
-        elif speed_x:
-            fh.write(f"Encode speed:     {speed_x}\n")
+        if encode_speed:
+            fh.write(f"Encode speed:     {encode_speed} realtime (ffmpeg pass)\n")
+        if check_speed:
+            fh.write(f"Check speed:      {check_speed} (reversibility pass)\n")
+        if overall_speed and overall_throughput:
+            fh.write(f"Overall:          {overall_speed} ({overall_throughput})\n")
+        elif overall_speed:
+            fh.write(f"Overall:          {overall_speed}\n")
         fh.write(f"Reversibility:    {rev_plain}\n")
         fh.write(f"File hashes:      {hashes_plain}\n")
         if md5:
