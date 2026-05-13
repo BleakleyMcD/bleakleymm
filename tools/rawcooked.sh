@@ -751,11 +751,14 @@ main() {
             else
                 tbm_error "DPX headers contain no frame rate metadata."
                 tbm_error "RAWcooked would silently default to 24 fps — which could be wrong for the content."
-                tbm_error "Specify --fps explicitly:"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 18     # silent film standard"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 16     # very early silent"
+                tbm_error "Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction);"
+                tbm_error "common values:"
                 tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 24     # sound film standard"
                 tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 23.976 # NTSC pulldown"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 18     # silent film standard"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 16     # early silent"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 14     # very early silent / hand-cranked"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 12     # earliest hand-cranked"
                 exit 4
             fi
         fi

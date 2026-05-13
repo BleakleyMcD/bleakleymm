@@ -735,11 +735,14 @@ def main() -> int:
             else:
                 log.error("DPX headers contain no frame rate metadata.")
                 log.error("RAWcooked would silently default to 24 fps — which could be wrong for the content.")
-                log.error("Specify --fps explicitly:")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 18     # silent film standard")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 16     # very early silent")
+                log.error("Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction);")
+                log.error("common values:")
                 log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 24     # sound film standard")
                 log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 23.976 # NTSC pulldown")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 18     # silent film standard")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 16     # early silent")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 14     # very early silent / hand-cranked")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 12     # earliest hand-cranked")
                 return 4
 
     cmd = ["rawcooked", "--all"]
