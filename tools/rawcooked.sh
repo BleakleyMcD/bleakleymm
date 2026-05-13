@@ -393,9 +393,10 @@ _preflight() {
 }
 
 # Technical Summary (encode only) — parses captured output, emits plain-English
-# breakdown to stderr and appends to log. Args: log framerate_source
+# breakdown to stderr and appends to log.
+# Args: log framerate_source total_wall_seconds
 _tech_summary() {
-    local log="$1" framerate_source="$2"
+    local log="$1" framerate_source="$2" total_wall="${3:-0}"
 
     local raw_format pretty_format
     raw_format=$(grep -m1 -E '^[[:space:]]*(DPX|TIFF|EXR)/' "$log" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -446,10 +447,33 @@ _tech_summary() {
     local log_lines
     log_lines=$(tr '\r' '\n' < "$log" 2>/dev/null || true)
 
-    # Check speed (reversibility pass): from the final rawcooked "Time=..." progress line.
-    local check_line check_speed
-    check_line=$(grep -E '^Time=' <<< "$log_lines" | tail -1 || true)
-    check_speed=$(grep -oE '[0-9.]+x realtime' <<< "$check_line" | head -1 || true)
+    # Check speed (reversibility pass): the check phase slows progressively, so report
+    # both endpoints + the true average. Parse first and last Time= lines for the
+    # instantaneous speeds; compute average as content_duration / check_wall_time.
+    local first_check_line="" last_check_line="" check_first="" check_last="" check_avg=""
+    first_check_line=$(grep -E '^Time=.*realtime' <<< "$log_lines" | head -1 || true)
+    last_check_line=$(grep -E '^Time=.*realtime'  <<< "$log_lines" | tail -1 || true)
+    check_first=$(grep -oE '[0-9.]+x realtime' <<< "$first_check_line" | head -1 | awk '{print $1}' || true)
+    check_last=$(grep -oE '[0-9.]+x realtime'  <<< "$last_check_line"  | head -1 | awk '{print $1}' || true)
+
+    # Average check speed = content seconds / check wall seconds.
+    # encode_wall comes from the final ffmpeg "elapsed=H:MM:SS[.ff]" field.
+    # check_wall = total_wall - encode_wall.
+    local content_seconds=0 encode_wall=0 check_wall=0
+    if [[ "$duration_str" =~ ^([0-9]+):([0-9]+):([0-9]+) ]]; then
+        content_seconds=$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
+    fi
+    local elapsed_str
+    elapsed_str=$(grep -oE 'elapsed=[0-9]+:[0-9]+:[0-9]+' <<< "$progress_line" | head -1 | sed 's/elapsed=//')
+    if [[ "$elapsed_str" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+        encode_wall=$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
+    fi
+    if (( total_wall > 0 && encode_wall > 0 )); then
+        check_wall=$((total_wall - encode_wall))
+    fi
+    if (( check_wall > 0 && content_seconds > 0 )); then
+        check_avg=$(awk -v c="$content_seconds" -v w="$check_wall" 'BEGIN { printf "%.2f", c/w }')
+    fi
 
     # Overall throughput: rawcooked's final "N.N MiB/s, N.NNx realtime" line (not the Time= ones).
     local overall_line overall_throughput overall_speed
@@ -502,7 +526,15 @@ _tech_summary() {
         [[ -n "$output_size" ]]   && printf '  %sOutput size:%s      %s\n' "${CYAN}" "${RESET}" "$output_size"
         [[ -n "$bitrate_mbps" ]]  && printf '  %sOutput bitrate:%s   ~%s Mbps\n' "${CYAN}" "${RESET}" "$bitrate_mbps"
         [[ -n "$encode_speed" ]] && printf '  %sEncode speed:%s     %s realtime (ffmpeg pass)\n' "${CYAN}" "${RESET}" "$encode_speed"
-        [[ -n "$check_speed" ]]  && printf '  %sCheck speed:%s      %s (reversibility pass)\n' "${CYAN}" "${RESET}" "$check_speed"
+        if [[ -n "$check_first" && -n "$check_last" && "$check_first" != "$check_last" ]]; then
+            if [[ -n "$check_avg" ]]; then
+                printf '  %sCheck speed:%s      %s → %s realtime (avg ~%sx)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last" "$check_avg"
+            else
+                printf '  %sCheck speed:%s      %s → %s realtime (start → end)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last"
+            fi
+        elif [[ -n "$check_last" ]]; then
+            printf '  %sCheck speed:%s      %s realtime (reversibility pass)\n' "${CYAN}" "${RESET}" "$check_last"
+        fi
         if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
             printf '  %sOverall:%s          %s (%s)\n' "${CYAN}" "${RESET}" "$overall_speed" "$overall_throughput"
         elif [[ -n "$overall_speed" ]]; then
@@ -530,7 +562,15 @@ _tech_summary() {
         [[ -n "$output_size" ]]   && echo "Output size:      $output_size"
         [[ -n "$bitrate_mbps" ]]  && echo "Output bitrate:   ~$bitrate_mbps Mbps"
         [[ -n "$encode_speed" ]] && echo "Encode speed:     $encode_speed realtime (ffmpeg pass)"
-        [[ -n "$check_speed" ]]  && echo "Check speed:      $check_speed (reversibility pass)"
+        if [[ -n "$check_first" && -n "$check_last" && "$check_first" != "$check_last" ]]; then
+            if [[ -n "$check_avg" ]]; then
+                echo "Check speed:      $check_first → $check_last realtime (avg ~${check_avg}x)"
+            else
+                echo "Check speed:      $check_first → $check_last realtime (start → end)"
+            fi
+        elif [[ -n "$check_last" ]]; then
+            echo "Check speed:      $check_last realtime (reversibility pass)"
+        fi
         if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
             echo "Overall:          $overall_speed ($overall_throughput)"
         elif [[ -n "$overall_speed" ]]; then
@@ -735,7 +775,7 @@ main() {
     end_et=$(_now_et)
 
     if [[ "$mode" == "encode" ]]; then
-        _tech_summary "$log" "$framerate_source"
+        _tech_summary "$log" "$framerate_source" "$((end_t - start_t))"
         _ffmpeg_summary "$log"
     fi
 

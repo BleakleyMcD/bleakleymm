@@ -373,8 +373,10 @@ def preflight(mode: str, input_path: Path, output: Path, log_path: Path) -> int:
     return 0
 
 
-def tech_summary(log_path: Path, framerate_source: str) -> None:
-    """Parse captured rawcooked/ffmpeg output and emit a Technical Summary."""
+def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> None:
+    """Parse captured rawcooked/ffmpeg output and emit a Technical Summary.
+    total_wall is the end-to-end wall time in seconds (used to compute the average
+    check speed; the check_wall portion = total_wall - encode_elapsed)."""
     text = log_path.read_text(errors="replace")
 
     def find(pat, flags=0):
@@ -428,11 +430,24 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
     # own line before parsing check/overall fields.
     text_lines = text.replace("\r", "\n")
 
-    # Check speed (reversibility pass): from the final rawcooked "Time=..." progress line.
-    time_lines = re.findall(r"^Time=.*$", text_lines, re.MULTILINE)
-    check_line = time_lines[-1] if time_lines else ""
-    chk_m = re.search(r"([\d.]+x realtime)", check_line)
-    check_speed = chk_m.group(1) if chk_m else ""
+    # Check speed (reversibility pass): the check phase slows progressively, so report
+    # both endpoints + the true average. Parse first and last Time= lines for the
+    # instantaneous speeds; compute average as content_duration / check_wall_time.
+    check_time_lines = re.findall(r"^Time=.*realtime.*$", text_lines, re.MULTILINE)
+    def _xspeed(line: str) -> str:
+        m = re.search(r"([\d.]+)x realtime", line)
+        return m.group(1) if m else ""
+    check_first = _xspeed(check_time_lines[0]) if check_time_lines else ""
+    check_last = _xspeed(check_time_lines[-1]) if check_time_lines else ""
+
+    # Average check speed = content_seconds / check_wall_seconds.
+    content_seconds = (int(dur_m.group(1)) * 3600 + int(dur_m.group(2)) * 60
+                       + int(float(dur_m.group(3)))) if dur_m else 0
+    elapsed_m = re.search(r"elapsed=(\d+):(\d+):(\d+)", progress)
+    encode_wall = (int(elapsed_m.group(1)) * 3600 + int(elapsed_m.group(2)) * 60
+                   + int(elapsed_m.group(3))) if elapsed_m else 0
+    check_wall = total_wall - encode_wall if (total_wall > 0 and encode_wall > 0) else 0
+    check_avg = f"{content_seconds / check_wall:.2f}" if (check_wall > 0 and content_seconds > 0) else ""
 
     # Overall throughput: rawcooked's final "N.N MiB/s, N.NNx realtime" line (not the Time= lines).
     overall_lines = [ln for ln in re.findall(r"^.*realtime.*$", text_lines, re.MULTILINE)
@@ -491,8 +506,16 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
         print(f"  {CYAN}Output bitrate:{RESET}   ~{bitrate_mbps} Mbps", file=sys.stderr)
     if encode_speed:
         print(f"  {CYAN}Encode speed:{RESET}     {encode_speed} realtime (ffmpeg pass)", file=sys.stderr)
-    if check_speed:
-        print(f"  {CYAN}Check speed:{RESET}      {check_speed} (reversibility pass)", file=sys.stderr)
+    if check_first and check_last and check_first != check_last:
+        if check_avg:
+            print(f"  {CYAN}Check speed:{RESET}      {check_first}x → {check_last}x realtime (avg ~{check_avg}x)",
+                  file=sys.stderr)
+        else:
+            print(f"  {CYAN}Check speed:{RESET}      {check_first}x → {check_last}x realtime (start → end)",
+                  file=sys.stderr)
+    elif check_last:
+        print(f"  {CYAN}Check speed:{RESET}      {check_last}x realtime (reversibility pass)",
+              file=sys.stderr)
     if overall_speed and overall_throughput:
         print(f"  {CYAN}Overall:{RESET}          {overall_speed} ({overall_throughput})", file=sys.stderr)
     elif overall_speed:
@@ -526,8 +549,13 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
             fh.write(f"Output bitrate:   ~{bitrate_mbps} Mbps\n")
         if encode_speed:
             fh.write(f"Encode speed:     {encode_speed} realtime (ffmpeg pass)\n")
-        if check_speed:
-            fh.write(f"Check speed:      {check_speed} (reversibility pass)\n")
+        if check_first and check_last and check_first != check_last:
+            if check_avg:
+                fh.write(f"Check speed:      {check_first}x → {check_last}x realtime (avg ~{check_avg}x)\n")
+            else:
+                fh.write(f"Check speed:      {check_first}x → {check_last}x realtime (start → end)\n")
+        elif check_last:
+            fh.write(f"Check speed:      {check_last}x realtime (reversibility pass)\n")
         if overall_speed and overall_throughput:
             fh.write(f"Overall:          {overall_speed} ({overall_throughput})\n")
         elif overall_speed:
@@ -731,7 +759,7 @@ def main() -> int:
     end_et = now_et()
 
     if mode == "encode":
-        tech_summary(log_path, framerate_source)
+        tech_summary(log_path, framerate_source, duration)
         ffmpeg_summary(log_path)
 
     postflight(status, duration, output, log_path, mode, start_et, end_et)
