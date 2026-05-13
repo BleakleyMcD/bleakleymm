@@ -528,12 +528,12 @@ _tech_summary() {
         [[ -n "$encode_speed" ]] && printf '  %sEncode speed:%s     %s realtime (ffmpeg pass)\n' "${CYAN}" "${RESET}" "$encode_speed"
         if [[ -n "$check_first" && -n "$check_last" && "$check_first" != "$check_last" ]]; then
             if [[ -n "$check_avg" ]]; then
-                printf '  %sCheck speed:%s      %s → %s realtime (avg ~%sx)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last" "$check_avg"
+                printf '  %sReversibility check speed:%s  %s → %s realtime (avg ~%sx)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last" "$check_avg"
             else
-                printf '  %sCheck speed:%s      %s → %s realtime (start → end)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last"
+                printf '  %sReversibility check speed:%s  %s → %s realtime (start → end)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last"
             fi
         elif [[ -n "$check_last" ]]; then
-            printf '  %sCheck speed:%s      %s realtime (reversibility pass)\n' "${CYAN}" "${RESET}" "$check_last"
+            printf '  %sReversibility check speed:%s  %s realtime\n' "${CYAN}" "${RESET}" "$check_last"
         fi
         if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
             printf '  %sOverall:%s          %s (%s)\n' "${CYAN}" "${RESET}" "$overall_speed" "$overall_throughput"
@@ -564,12 +564,12 @@ _tech_summary() {
         [[ -n "$encode_speed" ]] && echo "Encode speed:     $encode_speed realtime (ffmpeg pass)"
         if [[ -n "$check_first" && -n "$check_last" && "$check_first" != "$check_last" ]]; then
             if [[ -n "$check_avg" ]]; then
-                echo "Check speed:      $check_first → $check_last realtime (avg ~${check_avg}x)"
+                echo "Reversibility check speed:  $check_first → $check_last realtime (avg ~${check_avg}x)"
             else
-                echo "Check speed:      $check_first → $check_last realtime (start → end)"
+                echo "Reversibility check speed:  $check_first → $check_last realtime (start → end)"
             fi
         elif [[ -n "$check_last" ]]; then
-            echo "Check speed:      $check_last realtime (reversibility pass)"
+            echo "Reversibility check speed:  $check_last realtime"
         fi
         if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
             echo "Overall:          $overall_speed ($overall_throughput)"

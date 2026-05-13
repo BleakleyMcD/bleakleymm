@@ -508,14 +508,13 @@ def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> 
         print(f"  {CYAN}Encode speed:{RESET}     {encode_speed} realtime (ffmpeg pass)", file=sys.stderr)
     if check_first and check_last and check_first != check_last:
         if check_avg:
-            print(f"  {CYAN}Check speed:{RESET}      {check_first}x → {check_last}x realtime (avg ~{check_avg}x)",
+            print(f"  {CYAN}Reversibility check speed:{RESET}  {check_first}x → {check_last}x realtime (avg ~{check_avg}x)",
                   file=sys.stderr)
         else:
-            print(f"  {CYAN}Check speed:{RESET}      {check_first}x → {check_last}x realtime (start → end)",
+            print(f"  {CYAN}Reversibility check speed:{RESET}  {check_first}x → {check_last}x realtime (start → end)",
                   file=sys.stderr)
     elif check_last:
-        print(f"  {CYAN}Check speed:{RESET}      {check_last}x realtime (reversibility pass)",
-              file=sys.stderr)
+        print(f"  {CYAN}Reversibility check speed:{RESET}  {check_last}x realtime", file=sys.stderr)
     if overall_speed and overall_throughput:
         print(f"  {CYAN}Overall:{RESET}          {overall_speed} ({overall_throughput})", file=sys.stderr)
     elif overall_speed:
@@ -551,11 +550,11 @@ def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> 
             fh.write(f"Encode speed:     {encode_speed} realtime (ffmpeg pass)\n")
         if check_first and check_last and check_first != check_last:
             if check_avg:
-                fh.write(f"Check speed:      {check_first}x → {check_last}x realtime (avg ~{check_avg}x)\n")
+                fh.write(f"Reversibility check speed:  {check_first}x → {check_last}x realtime (avg ~{check_avg}x)\n")
             else:
-                fh.write(f"Check speed:      {check_first}x → {check_last}x realtime (start → end)\n")
+                fh.write(f"Reversibility check speed:  {check_first}x → {check_last}x realtime (start → end)\n")
         elif check_last:
-            fh.write(f"Check speed:      {check_last}x realtime (reversibility pass)\n")
+            fh.write(f"Reversibility check speed:  {check_last}x realtime\n")
         if overall_speed and overall_throughput:
             fh.write(f"Overall:          {overall_speed} ({overall_throughput})\n")
         elif overall_speed:
