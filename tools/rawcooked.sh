@@ -749,16 +749,18 @@ main() {
             if [[ "$probe" == "from DPX header" ]]; then
                 framerate_source="from DPX header"
             else
-                tbm_error "DPX headers contain no frame rate metadata."
-                tbm_error "RAWcooked would silently default to 24 fps — which could be wrong for the content."
-                tbm_error "Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction);"
-                tbm_error "common values:"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 24     # sound film standard"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 23.976 # NTSC pulldown"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 18     # silent film standard"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 16     # early silent"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 14     # very early silent / hand-cranked"
-                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 12     # earliest hand-cranked"
+                local _qin
+                _qin=$(printf '%q' "$input")
+                tbm_error "DPX headers contain no frame rate metadata.
+RAWcooked would silently default to 24 fps — which could be wrong for the content.
+Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction).
+Common examples:
+  ./tools/rawcooked.sh -i ${_qin} --fps 24      # sound film standard
+  ./tools/rawcooked.sh -i ${_qin} --fps 23.976  # NTSC pulldown
+  ./tools/rawcooked.sh -i ${_qin} --fps 18      # other common speeds
+  ./tools/rawcooked.sh -i ${_qin} --fps 16
+  ./tools/rawcooked.sh -i ${_qin} --fps 12
+  ./tools/rawcooked.sh -i ${_qin} --fps 8"
                 exit 4
             fi
         fi

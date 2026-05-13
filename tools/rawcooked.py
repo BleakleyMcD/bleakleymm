@@ -733,16 +733,19 @@ def main() -> int:
             if probe == "from DPX header":
                 framerate_source = "from DPX header"
             else:
-                log.error("DPX headers contain no frame rate metadata.")
-                log.error("RAWcooked would silently default to 24 fps — which could be wrong for the content.")
-                log.error("Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction);")
-                log.error("common values:")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 24     # sound film standard")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 23.976 # NTSC pulldown")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 18     # silent film standard")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 16     # early silent")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 14     # very early silent / hand-cranked")
-                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 12     # earliest hand-cranked")
+                qin = shlex.quote(str(in_path))
+                log.error(
+                    "DPX headers contain no frame rate metadata.\n"
+                    "RAWcooked would silently default to 24 fps — which could be wrong for the content.\n"
+                    "Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction).\n"
+                    "Common examples:\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 24      # sound film standard\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 23.976  # NTSC pulldown\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 18      # other common speeds\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 16\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 12\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 8"
+                )
                 return 4
 
     cmd = ["rawcooked", "--all"]
