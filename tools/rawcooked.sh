@@ -37,9 +37,12 @@ ${BOLD}${BLUE}NAME${RESET}
 
 ${BOLD}${BLUE}USAGE${RESET}
   ${GREEN}rawcooked.sh${RESET} ${CYAN}-i${RESET} ${YELLOW}PATH${RESET} [${CYAN}-o${RESET} ${YELLOW}OUTPUT${RESET}] [${CYAN}-n${RESET}] [${CYAN}--force${RESET}] [${CYAN}--${RESET} ${YELLOW}EXTRA...${RESET}]
+  ${GREEN}rawcooked.sh${RESET} [${CYAN}--fps${RESET} ${YELLOW}N${RESET}] [${CYAN}--force${RESET}] ${YELLOW}PATH${RESET} ${YELLOW}PATH${RESET} ${YELLOW}PATH${RESET}...    ${DIM}# batch mode${RESET}
 
 ${BOLD}${BLUE}OPTIONS${RESET}
-  ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}            DPX sequence directory (encode) or ${YELLOW}.mkv${RESET} file (decode)
+  ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}            DPX sequence directory (encode) or ${YELLOW}.mkv${RESET} file (decode).
+                     Repeatable. May also be given as positional args (for
+                     drag-and-drop). Two or more inputs triggers batch mode.
   ${CYAN}-o${RESET} ${YELLOW}OUTPUT${RESET}          Output path. Default: rawcooked's default
                      (${YELLOW}\${input}.mkv${RESET} on encode, ${YELLOW}\${input}.RAWcooked/${RESET} on decode).
   ${CYAN}--fps${RESET} ${YELLOW}N${RESET}            Frame rate to pass to rawcooked. Any ffmpeg value works
@@ -62,12 +65,28 @@ ${BOLD}${BLUE}DEFAULTS${RESET}
   by appending the negating flag after ${CYAN}--${RESET}, e.g. ${YELLOW}-- --no-conch${RESET}.
 
 ${BOLD}${BLUE}LOGGING${RESET}
-  A sibling ${YELLOW}<output>.log${RESET} is written next to the rawcooked output. It contains:
+  A sibling ${YELLOW}<output>.log${RESET} is written next to each rawcooked output. It contains:
   pre-flight summary (input, output, DPX sequence analysis with first/last 10
   frames and any missing sequence numbers), the full rawcooked stdout+stderr,
   a Technical Summary (encode only — plain-English breakdown of what was encoded),
   an ffmpeg pipeline section (encode only), and a post-flight summary
-  (Started/Finished in ET, duration, exit status, output size, output MD5).
+  (Started/Finished in ET, durations, exit status, output size, output MD5).
+
+  In batch mode (2+ inputs), an additional summary log is written to
+  ${YELLOW}\$HOME/_rawcooked_admin/batch_logs/YYYYMMDDTHHMMSS_batch.log${RESET}: header with
+  input list and flags, one entry per sequence (path + result + per-seq log
+  path), footer with totals.
+
+${BOLD}${BLUE}BATCH MODE${RESET}
+  When more than one input is provided (via ${CYAN}-i${RESET} repeated or positional args),
+  the wrapper processes each sequence in turn. Per-sequence failures (naming
+  mismatches, missing fps, rawcooked errors) are logged in the batch summary
+  but do ${YELLOW}not${RESET} bail the batch — remaining sequences still run. The wrapper
+  exits 0 if all succeeded, 1 if any failed. Systemic problems (rawcooked
+  not on PATH, SIGINT/SIGTERM) bail the whole batch immediately.
+
+  ${CYAN}-o${RESET} ${YELLOW}OUTPUT${RESET} is rejected in batch mode (each sequence gets ${YELLOW}\${input}.mkv${RESET}
+  automatically). ${CYAN}--fps${RESET}, ${CYAN}--force${RESET}, and ${CYAN}--${RESET} ${YELLOW}EXTRA...${RESET} apply to every sequence.
 EOF
 }
 
@@ -764,25 +783,21 @@ _postflight() {
     return 0  # see comment on the same pattern in _tech_summary
 }
 
-main() {
-    if [[ $# -eq 0 ]]; then _usage; exit 0; fi
-    local input="" output="" dry=0 force=0 fps=""
-    local extras=()
+# --- batch-mode globals: set by main() once, read by _process_one() per input ---
+RC_FPS=""
+RC_FORCE=0
+RC_DRY=0
+RC_OUTPUT_OVERRIDE=""   # only valid with a single input
+RC_EXTRAS=()
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -i) input="${2:-}"; shift 2 ;;
-            -o) output="${2:-}"; shift 2 ;;
-            --fps) fps="${2:-}"; shift 2 ;;
-            -n|--dry-run) dry=1; shift ;;
-            --force) force=1; shift ;;
-            -h|--help) _help; exit 0 ;;
-            --) shift; extras=("$@"); break ;;
-            *) tbm_error "Unknown arg: $1"; _usage >&2; exit 2 ;;
-        esac
-    done
-
-    [[ -n "$input" ]] || { tbm_error "-i INPUT required"; _usage >&2; exit 2; }
+# Process one input path end-to-end. Returns:
+#   0 = success
+#   2 = bad input shape or usage error
+#   3 = preflight (naming) error
+#   4 = no fps metadata + no --fps flag
+#   other = rawcooked's own exit status
+_process_one() {
+    local input="$1"
 
     local mode
     if [[ -d "$input" ]]; then
@@ -791,10 +806,15 @@ main() {
         mode="decode"
     else
         tbm_error "input must be a directory (encode) or .mkv file (decode): $input"
-        exit 2
+        return 2
     fi
 
-    [[ -n "$output" ]] || output=$(_default_output "$input" "$mode")
+    local output
+    if [[ -n "$RC_OUTPUT_OVERRIDE" ]]; then
+        output="$RC_OUTPUT_OVERRIDE"
+    else
+        output=$(_default_output "$input" "$mode")
+    fi
     local log="${output}.log"
 
     # Frame rate resolution (encode mode only). If --fps wasn't given, probe the first
@@ -802,7 +822,7 @@ main() {
     # rawcooked silently default to 24 fps — that default could be wrong for the content.
     local framerate_source=""
     if [[ "$mode" == "encode" ]]; then
-        if [[ -n "$fps" ]]; then
+        if [[ -n "$RC_FPS" ]]; then
             framerate_source="from --fps flag"
         else
             local probe
@@ -812,8 +832,6 @@ main() {
             else
                 local _qin
                 _qin=$(printf '%q' "$input")
-                # fps values padded so the inline '#' comments align at the same column.
-                # "--fps 23.976" is the longest (12 chars), so pad shorter ones to match.
                 tbm_error "DPX headers contain no frame rate metadata.
 
 RAWcooked would silently default to 24 fps — which could be wrong for the content.
@@ -827,20 +845,20 @@ Common examples:
   ./tools/rawcooked.sh -i ${_qin} --fps 16      # other common silent speed
   ./tools/rawcooked.sh -i ${_qin} --fps 12      # less common silent speed
   ./tools/rawcooked.sh -i ${_qin} --fps 8       # plausible"
-                exit 4
+                return 4
             fi
         fi
     fi
 
     local cmd=(rawcooked --all)
-    (( force )) && cmd+=(-y)
-    [[ -n "$fps" ]] && cmd+=(-framerate "$fps")
+    (( RC_FORCE )) && cmd+=(-y)
+    [[ -n "$RC_FPS" ]] && cmd+=(-framerate "$RC_FPS")
     cmd+=(-o "$output" "$input")
-    if (( ${#extras[@]} > 0 )); then
-        cmd+=("${extras[@]}")
+    if (( ${#RC_EXTRAS[@]} > 0 )); then
+        cmd+=("${RC_EXTRAS[@]}")
     fi
 
-    if (( dry )); then
+    if (( RC_DRY )); then
         local quoted="" arg
         for arg in "${cmd[@]}"; do
             quoted+=" $(printf '%q' "$arg")"
@@ -849,8 +867,6 @@ Common examples:
         tbm_info "[dry-run] would write log: $log"
         return 0
     fi
-
-    tbm_require rawcooked
 
     local preflight_status=0
     _preflight "$mode" "$input" "$output" "$log" || preflight_status=$?
@@ -864,8 +880,14 @@ Common examples:
     local start_t end_t status start_et end_et
     start_t=$(date +%s)
     start_et=$(_now_et)
-    { "${cmd[@]}" 2>&1; } | tee -a "$log" || true
-    status=${PIPESTATUS[0]}
+    # Use if/else to capture PIPESTATUS before any other command runs.
+    # `cmd | tee || true` would otherwise reset PIPESTATUS via the `true` call,
+    # which silently swallowed rawcooked's exit status in earlier versions.
+    if { "${cmd[@]}" 2>&1; } | tee -a "$log"; then
+        status=0
+    else
+        status=${PIPESTATUS[0]}
+    fi
     end_t=$(date +%s)
     end_et=$(_now_et)
 
@@ -877,6 +899,158 @@ Common examples:
     _postflight "$status" "$((end_t - start_t))" "$output" "$log" "$mode" "$start_et" "$end_et"
 
     return "$status"
+}
+
+# Batch summary log lives at $HOME/_rawcooked_admin/batch_logs/.
+# Header (run metadata), per-sequence result lines, footer with totals.
+_batch_log_dir() { echo "$HOME/_rawcooked_admin/batch_logs"; }
+
+main() {
+    if [[ $# -eq 0 ]]; then _usage; exit 0; fi
+
+    # Reset globals (function may be re-entered in tests; safer to be explicit).
+    RC_FPS=""; RC_FORCE=0; RC_DRY=0; RC_OUTPUT_OVERRIDE=""; RC_EXTRAS=()
+    local -a inputs=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i) inputs+=("${2:-}"); shift 2 ;;
+            -o) RC_OUTPUT_OVERRIDE="${2:-}"; shift 2 ;;
+            --fps) RC_FPS="${2:-}"; shift 2 ;;
+            -n|--dry-run) RC_DRY=1; shift ;;
+            --force) RC_FORCE=1; shift ;;
+            -h|--help) _help; exit 0 ;;
+            --) shift; RC_EXTRAS=("$@"); break ;;
+            -*) tbm_error "Unknown flag: $1"; _usage >&2; exit 2 ;;
+            *) inputs+=("$1"); shift ;;
+        esac
+    done
+
+    (( ${#inputs[@]} > 0 )) || { tbm_error "no input provided (use -i PATH or positional args)"; _usage >&2; exit 2; }
+
+    # -o doesn't make sense with multiple inputs (each gets <input>.mkv automatically).
+    if (( ${#inputs[@]} > 1 )) && [[ -n "$RC_OUTPUT_OVERRIDE" ]]; then
+        tbm_error "-o is not valid with multiple inputs (each gets <input>.mkv automatically)"
+        exit 2
+    fi
+
+    # Systemic precondition: rawcooked must be on PATH (skip the check in dry-run mode).
+    (( RC_DRY )) || tbm_require rawcooked
+
+    # Single-input fast path — same behavior as the pre-batch version of this script.
+    if (( ${#inputs[@]} == 1 )); then
+        _process_one "${inputs[0]}"
+        return $?
+    fi
+
+    # --- Batch mode (2+ inputs) ---
+    local total=${#inputs[@]}
+    local batch_dir batch_log
+    batch_dir=$(_batch_log_dir)
+    mkdir -p "$batch_dir" || { tbm_error "cannot create batch log dir: $batch_dir"; exit 2; }
+    batch_log="${batch_dir}/$(date '+%Y%m%dT%H%M%S')_batch.log"
+
+    local batch_start_t batch_start_et
+    batch_start_t=$(date +%s)
+    batch_start_et=$(_now_et)
+
+    # Batch header — terminal (stderr).
+    {
+        echo ""
+        printf '%s%s%s\n' "${BOLD}${BLUE}" "$_SEP" "${RESET}"
+        printf '  RAWcooked BATCH  (%d sequences)\n' "$total"
+        printf '%s%s%s\n' "${BOLD}${BLUE}" "$_SEP" "${RESET}"
+        printf '  %sStarted:%s   %s\n' "${CYAN}" "${RESET}" "$batch_start_et"
+        printf '  %sBatch log:%s %s\n' "${CYAN}" "${RESET}" "$batch_log"
+        echo ""
+    } >&2
+
+    # Batch header — log file.
+    {
+        echo "RAWcooked Batch Log"
+        printf '=%.0s' {1..63}; echo
+        echo "Started:  $(date '+%Y-%m-%d %H:%M:%S') ($batch_start_et)"
+        echo "Count:    $total sequences"
+        echo "Flags:    --fps=${RC_FPS:-<auto>} --force=$RC_FORCE --dry-run=$RC_DRY"
+        echo ""
+        echo "Inputs:"
+        local _i
+        for _i in "${inputs[@]}"; do
+            echo "  $_i"
+        done
+        echo ""
+        echo "Results"
+        echo "-------"
+    } > "$batch_log"
+
+    # Process each input. Per-sequence failures don't bail the batch.
+    local success=0 failed=0
+    local input item_status result item_idx=0 item_log
+    for input in "${inputs[@]}"; do
+        item_idx=$((item_idx + 1))
+        tbm_info "[$item_idx/$total] processing: $input"
+        item_status=0
+        _process_one "$input" || item_status=$?
+        if (( item_status == 0 )); then
+            success=$((success + 1))
+            result="success"
+        else
+            failed=$((failed + 1))
+            result="FAILED (exit $item_status)"
+        fi
+        # Best-effort per-item .log path for the batch entry — use the same default
+        # logic _process_one used (mode-dependent for encode/decode).
+        if [[ -d "$input" ]]; then
+            item_log="$(_default_output "$input" encode).log"
+        elif [[ -f "$input" && "${input,,}" == *.mkv ]]; then
+            item_log="$(_default_output "$input" decode).log"
+        else
+            item_log="(no log; bad input shape)"
+        fi
+        printf '[%d/%d] %s\n         result: %s\n         log:    %s\n' \
+            "$item_idx" "$total" "$input" "$result" "$item_log" >> "$batch_log"
+    done
+
+    local batch_end_t batch_end_et batch_dur
+    batch_end_t=$(date +%s)
+    batch_end_et=$(_now_et)
+    batch_dur=$(_fmt_duration $((batch_end_t - batch_start_t)))
+
+    # Batch footer — terminal banner.
+    local batch_status_color batch_status_word
+    if (( failed == 0 )); then
+        batch_status_color="${GREEN}"; batch_status_word="all $total succeeded"
+    else
+        batch_status_color="${RED}";   batch_status_word="$failed of $total failed"
+    fi
+    {
+        echo ""
+        printf '%s%s%s\n' "${BOLD}${BLUE}" "$_SEP" "${RESET}"
+        printf '  Batch summary   %s%s%s\n' "${batch_status_color}" "$batch_status_word" "${RESET}"
+        printf '%s%s%s\n' "${BOLD}${BLUE}" "$_SEP" "${RESET}"
+        printf '  %sStarted:%s    %s\n' "${CYAN}" "${RESET}" "$batch_start_et"
+        printf '  %sFinished:%s   %s\n' "${CYAN}" "${RESET}" "$batch_end_et"
+        printf '  %sDuration:%s   %s\n' "${CYAN}" "${RESET}" "$batch_dur"
+        printf '  %sTotal:%s      %d sequences\n' "${CYAN}" "${RESET}" "$total"
+        printf '  %sSucceeded:%s  %s%d%s\n' "${CYAN}" "${RESET}" "${GREEN}" "$success" "${RESET}"
+        printf '  %sFailed:%s     %s%d%s\n' "${CYAN}" "${RESET}" "${RED}" "$failed" "${RESET}"
+        printf '  %sBatch log:%s  %s\n' "${CYAN}" "${RESET}" "$batch_log"
+        printf '%s%s%s\n' "${BOLD}${BLUE}" "$_SEP" "${RESET}"
+        echo ""
+    } >&2
+
+    # Batch footer — log file.
+    {
+        echo ""
+        echo "Summary"
+        echo "-------"
+        printf '%-19s %s\n' "Finished:"  "$batch_end_et"
+        printf '%-19s %s\n' "Duration:"  "$batch_dur"
+        printf '%-19s %d\n' "Succeeded:" "$success"
+        printf '%-19s %d\n' "Failed:"    "$failed"
+    } >> "$batch_log"
+
+    (( failed == 0 ))
 }
 
 main "$@"

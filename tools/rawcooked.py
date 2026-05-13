@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -69,9 +70,12 @@ def print_help():
 
 {BOLD}{BLUE}USAGE{RESET}
   {GREEN}rawcooked.py{RESET} {CYAN}-i{RESET} {YELLOW}PATH{RESET} [{CYAN}-o{RESET} {YELLOW}OUTPUT{RESET}] [{CYAN}-n{RESET}] [{CYAN}--force{RESET}] [{CYAN}--{RESET} {YELLOW}EXTRA...{RESET}]
+  {GREEN}rawcooked.py{RESET} [{CYAN}--fps{RESET} {YELLOW}N{RESET}] [{CYAN}--force{RESET}] {YELLOW}PATH{RESET} {YELLOW}PATH{RESET} {YELLOW}PATH{RESET}...    {DIM}# batch mode{RESET}
 
 {BOLD}{BLUE}OPTIONS{RESET}
-  {CYAN}-i{RESET} {YELLOW}PATH{RESET}            DPX sequence directory (encode) or {YELLOW}.mkv{RESET} file (decode)
+  {CYAN}-i{RESET} {YELLOW}PATH{RESET}            DPX sequence directory (encode) or {YELLOW}.mkv{RESET} file (decode).
+                     Repeatable. May also be given as positional args (for
+                     drag-and-drop). Two or more inputs triggers batch mode.
   {CYAN}-o{RESET} {YELLOW}OUTPUT{RESET}          Output path. Default: rawcooked's default
                      ({YELLOW}${{input}}.mkv{RESET} on encode, {YELLOW}${{input}}.RAWcooked/{RESET} on decode).
   {CYAN}--fps{RESET} {YELLOW}N{RESET}            Frame rate to pass to rawcooked. Any ffmpeg value works
@@ -94,12 +98,28 @@ def print_help():
   by appending the negating flag after {CYAN}--{RESET}, e.g. {YELLOW}-- --no-conch{RESET}.
 
 {BOLD}{BLUE}LOGGING{RESET}
-  A sibling {YELLOW}<output>.log{RESET} is written next to the rawcooked output. It contains:
+  A sibling {YELLOW}<output>.log{RESET} is written next to each rawcooked output. It contains:
   pre-flight summary (input, output, DPX sequence analysis with first/last 10
   frames and any missing sequence numbers), the full rawcooked stdout+stderr,
   a Technical Summary (encode only — plain-English breakdown of what was encoded),
   an ffmpeg pipeline section (encode only), and a post-flight summary
-  (Started/Finished in ET, duration, exit status, output size, output MD5).""")
+  (Started/Finished in ET, durations, exit status, output size, output MD5).
+
+  In batch mode (2+ inputs), an additional summary log is written to
+  {YELLOW}$HOME/_rawcooked_admin/batch_logs/YYYYMMDDTHHMMSS_batch.log{RESET}: header with
+  input list and flags, one entry per sequence (path + result + per-seq log
+  path), footer with totals.
+
+{BOLD}{BLUE}BATCH MODE{RESET}
+  When more than one input is provided (via {CYAN}-i{RESET} repeated or positional args),
+  the wrapper processes each sequence in turn. Per-sequence failures (naming
+  mismatches, missing fps, rawcooked errors) are logged in the batch summary
+  but do {YELLOW}not{RESET} bail the batch — remaining sequences still run. The wrapper
+  exits 0 if all succeeded, 1 if any failed. Systemic problems (rawcooked
+  not on PATH, SIGINT/SIGTERM) bail the whole batch immediately.
+
+  {CYAN}-o{RESET} {YELLOW}OUTPUT{RESET} is rejected in batch mode (each sequence gets {YELLOW}${{input}}.mkv{RESET}
+  automatically). {CYAN}--fps{RESET}, {CYAN}--force{RESET}, and {CYAN}--{RESET} {YELLOW}EXTRA...{RESET} apply to every sequence.""")
 
 
 def detect_mode(in_path: Path) -> str | None:
@@ -720,47 +740,31 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
             fh.write(f"{'Output MD5:':<19} {md5}\n")
 
 
-def main() -> int:
-    install_sigterm_trap()
-    argv = sys.argv[1:]
-    if not argv:
-        print_usage()
-        return 0
+@dataclass
+class RcOptions:
+    """Per-invocation flags shared across all inputs in a batch."""
+    fps: str = ""
+    force: bool = False
+    dry_run: bool = False
+    output_override: str | None = None  # only valid with a single input
+    extras: list[str] = field(default_factory=list)
 
-    extras: list[str] = []
-    if "--" in argv:
-        i = argv.index("--")
-        extras = argv[i + 1:]
-        argv = argv[:i]
 
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("-i", "--input")
-    p.add_argument("-o", "--output")
-    p.add_argument("--fps")
-    p.add_argument("-n", "--dry-run", action="store_true")
-    p.add_argument("--force", action="store_true")
-    p.add_argument("-h", "--help", action="store_true")
-
-    try:
-        args = p.parse_args(argv)
-    except SystemExit as e:
-        return int(e.code) if isinstance(e.code, int) else 2
-
-    if args.help:
-        print_help()
-        return 0
-    if not args.input:
-        log.error("-i INPUT required")
-        print_usage(to=sys.stderr)
-        return 2
-
-    in_path = Path(args.input)
+def process_one(in_path: Path, opts: RcOptions) -> int:
+    """Process one input end-to-end. Returns:
+        0 = success
+        2 = bad input shape / usage error
+        3 = preflight (naming) error
+        4 = no fps metadata + no --fps flag
+        other = rawcooked's own exit status
+    """
     mode = detect_mode(in_path)
     if mode is None:
         log.error(f"input must be a directory (encode) or .mkv file (decode): {in_path}")
         return 2
 
-    output = Path(args.output) if args.output else default_output(in_path, mode)
+    output = (Path(opts.output_override) if opts.output_override
+              else default_output(in_path, mode))
     log_path = Path(str(output) + ".log")
 
     # Frame rate resolution (encode mode only). If --fps wasn't given, probe the first
@@ -768,7 +772,7 @@ def main() -> int:
     # rawcooked silently default to 24 fps — that default could be wrong for the content.
     framerate_source = ""
     if mode == "encode":
-        if args.fps:
+        if opts.fps:
             framerate_source = "from --fps flag"
         else:
             probe = probe_framerate_source(in_path)
@@ -776,8 +780,6 @@ def main() -> int:
                 framerate_source = "from DPX header"
             else:
                 qin = shlex.quote(str(in_path))
-                # fps values padded so the inline '#' comments align at the same column.
-                # "--fps 23.976" is the longest (12 chars), so pad shorter ones to match.
                 log.error(
                     "DPX headers contain no frame rate metadata.\n"
                     "\n"
@@ -796,19 +798,17 @@ def main() -> int:
                 return 4
 
     cmd = ["rawcooked", "--all"]
-    if args.force:
+    if opts.force:
         cmd.append("-y")
-    if args.fps:
-        cmd.extend(["-framerate", str(args.fps)])
+    if opts.fps:
+        cmd.extend(["-framerate", str(opts.fps)])
     cmd.extend(["-o", str(output), str(in_path)])
-    cmd.extend(extras)
+    cmd.extend(opts.extras)
 
-    if args.dry_run:
+    if opts.dry_run:
         log.info("[dry-run] " + " ".join(shlex.quote(c) for c in cmd))
         log.info(f"[dry-run] would write log: {log_path}")
         return 0
-
-    require("rawcooked")
 
     preflight_status = preflight(mode, in_path, output, log_path)
     if preflight_status != 0:
@@ -839,6 +839,168 @@ def main() -> int:
 
     postflight(status, duration, output, log_path, mode, start_et, end_et)
     return status
+
+
+def _batch_log_dir() -> Path:
+    return Path.home() / "_rawcooked_admin" / "batch_logs"
+
+
+def run_batch(inputs: list[str], opts: RcOptions) -> int:
+    """Run multiple sequences. Per-sequence failures don't bail the batch.
+    Returns 0 if all succeeded, 1 if any failed."""
+    total = len(inputs)
+    batch_dir = _batch_log_dir()
+    try:
+        batch_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log.error(f"cannot create batch log dir: {batch_dir} ({e})")
+        return 2
+
+    batch_log = batch_dir / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}_batch.log"
+    batch_start_t = time.time()
+    batch_start_et = now_et()
+
+    # Batch header — terminal (stderr).
+    print(file=sys.stderr)
+    print(f"{BOLD}{BLUE}{SEP}{RESET}", file=sys.stderr)
+    print(f"  RAWcooked BATCH  ({total} sequences)", file=sys.stderr)
+    print(f"{BOLD}{BLUE}{SEP}{RESET}", file=sys.stderr)
+    print(f"  {CYAN}Started:{RESET}   {batch_start_et}", file=sys.stderr)
+    print(f"  {CYAN}Batch log:{RESET} {batch_log}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Batch header — log file.
+    with batch_log.open("w") as fh:
+        fh.write("RAWcooked Batch Log\n")
+        fh.write("=" * 63 + "\n")
+        fh.write(f"Started:  {datetime.now():%Y-%m-%d %H:%M:%S} ({batch_start_et})\n")
+        fh.write(f"Count:    {total} sequences\n")
+        fh.write(f"Flags:    --fps={opts.fps or '<auto>'} "
+                 f"--force={int(opts.force)} --dry-run={int(opts.dry_run)}\n\n")
+        fh.write("Inputs:\n")
+        for inp in inputs:
+            fh.write(f"  {inp}\n")
+        fh.write("\nResults\n-------\n")
+
+    # Process each input. Per-sequence failures don't bail the batch.
+    success = 0
+    failed = 0
+    for idx, inp in enumerate(inputs, start=1):
+        in_path = Path(inp)
+        log.info(f"[{idx}/{total}] processing: {inp}")
+        item_status = process_one(in_path, opts)
+        if item_status == 0:
+            success += 1
+            result = "success"
+        else:
+            failed += 1
+            result = f"FAILED (exit {item_status})"
+
+        mode = detect_mode(in_path)
+        item_log = (str(default_output(in_path, mode)) + ".log"
+                    if mode else "(no log; bad input shape)")
+        with batch_log.open("a") as fh:
+            fh.write(f"[{idx}/{total}] {inp}\n")
+            fh.write(f"         result: {result}\n")
+            fh.write(f"         log:    {item_log}\n")
+
+    batch_end_t = time.time()
+    batch_end_et = now_et()
+    batch_dur = fmt_duration(int(batch_end_t - batch_start_t))
+
+    if failed == 0:
+        bs_color, bs_word = GREEN, f"all {total} succeeded"
+    else:
+        bs_color, bs_word = RED, f"{failed} of {total} failed"
+
+    # Batch footer — terminal.
+    print(file=sys.stderr)
+    print(f"{BOLD}{BLUE}{SEP}{RESET}", file=sys.stderr)
+    print(f"  Batch summary   {bs_color}{bs_word}{RESET}", file=sys.stderr)
+    print(f"{BOLD}{BLUE}{SEP}{RESET}", file=sys.stderr)
+    print(f"  {CYAN}Started:{RESET}    {batch_start_et}", file=sys.stderr)
+    print(f"  {CYAN}Finished:{RESET}   {batch_end_et}", file=sys.stderr)
+    print(f"  {CYAN}Duration:{RESET}   {batch_dur}", file=sys.stderr)
+    print(f"  {CYAN}Total:{RESET}      {total} sequences", file=sys.stderr)
+    print(f"  {CYAN}Succeeded:{RESET}  {GREEN}{success}{RESET}", file=sys.stderr)
+    print(f"  {CYAN}Failed:{RESET}     {RED}{failed}{RESET}", file=sys.stderr)
+    print(f"  {CYAN}Batch log:{RESET}  {batch_log}", file=sys.stderr)
+    print(f"{BOLD}{BLUE}{SEP}{RESET}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Batch footer — log file.
+    with batch_log.open("a") as fh:
+        fh.write("\nSummary\n-------\n")
+        fh.write(f"{'Finished:':<19} {batch_end_et}\n")
+        fh.write(f"{'Duration:':<19} {batch_dur}\n")
+        fh.write(f"{'Succeeded:':<19} {success}\n")
+        fh.write(f"{'Failed:':<19} {failed}\n")
+
+    return 0 if failed == 0 else 1
+
+
+def main() -> int:
+    install_sigterm_trap()
+    argv = sys.argv[1:]
+    if not argv:
+        print_usage()
+        return 0
+
+    # Split off pass-through extras at the first '--'.
+    extras: list[str] = []
+    if "--" in argv:
+        idx = argv.index("--")
+        extras = argv[idx + 1:]
+        argv = argv[:idx]
+
+    # Manual arg parsing so -i can be repeated AND positional args also collect into inputs.
+    inputs: list[str] = []
+    opts = RcOptions(extras=extras)
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-i", "--input"):
+            if i + 1 >= len(argv):
+                log.error(f"{a} requires a value"); return 2
+            inputs.append(argv[i + 1]); i += 2
+        elif a in ("-o", "--output"):
+            if i + 1 >= len(argv):
+                log.error(f"{a} requires a value"); return 2
+            opts.output_override = argv[i + 1]; i += 2
+        elif a == "--fps":
+            if i + 1 >= len(argv):
+                log.error("--fps requires a value"); return 2
+            opts.fps = argv[i + 1]; i += 2
+        elif a in ("-n", "--dry-run"):
+            opts.dry_run = True; i += 1
+        elif a == "--force":
+            opts.force = True; i += 1
+        elif a in ("-h", "--help"):
+            print_help(); return 0
+        elif a.startswith("-"):
+            log.error(f"Unknown flag: {a}")
+            print_usage(to=sys.stderr); return 2
+        else:
+            inputs.append(a); i += 1
+
+    if not inputs:
+        log.error("no input provided (use -i PATH or positional args)")
+        print_usage(to=sys.stderr); return 2
+
+    if len(inputs) > 1 and opts.output_override:
+        log.error("-o is not valid with multiple inputs (each gets <input>.mkv automatically)")
+        return 2
+
+    # Systemic precondition (skip in dry-run mode).
+    if not opts.dry_run:
+        require("rawcooked")
+
+    # Single-input fast path — same behavior as the pre-batch version of this script.
+    if len(inputs) == 1:
+        return process_one(Path(inputs[0]), opts)
+
+    # Batch mode (2+ inputs).
+    return run_batch(inputs, opts)
 
 
 if __name__ == "__main__":
