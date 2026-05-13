@@ -42,10 +42,13 @@ ${BOLD}${BLUE}OPTIONS${RESET}
   ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}            DPX sequence directory (encode) or ${YELLOW}.mkv${RESET} file (decode)
   ${CYAN}-o${RESET} ${YELLOW}OUTPUT${RESET}          Output path. Default: rawcooked's default
                      (${YELLOW}\${input}.mkv${RESET} on encode, ${YELLOW}\${input}.RAWcooked/${RESET} on decode).
+  ${CYAN}--fps${RESET} ${YELLOW}N${RESET}            Frame rate to pass to rawcooked (e.g. ${YELLOW}24${RESET}, ${YELLOW}18${RESET}, ${YELLOW}16${RESET},
+                     ${YELLOW}23.976${RESET}). Required if the DPX header has no frame-rate
+                     metadata; overrides the header if present.
   ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}       Print the rawcooked command, don't run it
   ${CYAN}--force${RESET}             Pass ${YELLOW}-y${RESET} to rawcooked — overwrite existing outputs
   ${CYAN}--${RESET} ${YELLOW}EXTRA...${RESET}        Anything after ${CYAN}--${RESET} is passed to rawcooked verbatim
-                     (e.g. ${YELLOW}--no-check-padding${RESET}, ${YELLOW}-framerate 24${RESET})
+                     (e.g. ${YELLOW}--no-check-padding${RESET})
   ${CYAN}-h${RESET}, ${CYAN}--help${RESET}          Show this help
 
 ${BOLD}${BLUE}MODES${RESET}
@@ -702,13 +705,14 @@ _postflight() {
 
 main() {
     if [[ $# -eq 0 ]]; then _usage; exit 0; fi
-    local input="" output="" dry=0 force=0
+    local input="" output="" dry=0 force=0 fps=""
     local extras=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -i) input="${2:-}"; shift 2 ;;
             -o) output="${2:-}"; shift 2 ;;
+            --fps) fps="${2:-}"; shift 2 ;;
             -n|--dry-run) dry=1; shift ;;
             --force) force=1; shift ;;
             -h|--help) _help; exit 0 ;;
@@ -732,8 +736,34 @@ main() {
     [[ -n "$output" ]] || output=$(_default_output "$input" "$mode")
     local log="${output}.log"
 
+    # Frame rate resolution (encode mode only). If --fps wasn't given, probe the first
+    # DPX header. If the header lacks metadata too, refuse to proceed rather than let
+    # rawcooked silently default to 24 fps — that default could be wrong for the content.
+    local framerate_source=""
+    if [[ "$mode" == "encode" ]]; then
+        if [[ -n "$fps" ]]; then
+            framerate_source="from --fps flag"
+        else
+            local probe
+            probe=$(_probe_framerate_source "$input")
+            if [[ "$probe" == "from DPX header" ]]; then
+                framerate_source="from DPX header"
+            else
+                tbm_error "DPX headers contain no frame rate metadata."
+                tbm_error "RAWcooked would silently default to 24 fps — which could be wrong for the content."
+                tbm_error "Specify --fps explicitly:"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 18     # silent film standard"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 16     # very early silent"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 24     # sound film standard"
+                tbm_error "  ./tools/rawcooked.sh -i $(printf '%q' "$input") --fps 23.976 # NTSC pulldown"
+                exit 4
+            fi
+        fi
+    fi
+
     local cmd=(rawcooked --all)
     (( force )) && cmd+=(-y)
+    [[ -n "$fps" ]] && cmd+=(-framerate "$fps")
     cmd+=(-o "$output" "$input")
     if (( ${#extras[@]} > 0 )); then
         cmd+=("${extras[@]}")
@@ -750,12 +780,6 @@ main() {
     fi
 
     tbm_require rawcooked
-
-    # Probe framerate provenance before encode.
-    local framerate_source=""
-    if [[ "$mode" == "encode" ]]; then
-        framerate_source=$(_probe_framerate_source "$input")
-    fi
 
     local preflight_status=0
     _preflight "$mode" "$input" "$output" "$log" || preflight_status=$?

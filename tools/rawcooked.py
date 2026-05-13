@@ -74,10 +74,13 @@ def print_help():
   {CYAN}-i{RESET} {YELLOW}PATH{RESET}            DPX sequence directory (encode) or {YELLOW}.mkv{RESET} file (decode)
   {CYAN}-o{RESET} {YELLOW}OUTPUT{RESET}          Output path. Default: rawcooked's default
                      ({YELLOW}${{input}}.mkv{RESET} on encode, {YELLOW}${{input}}.RAWcooked/{RESET} on decode).
+  {CYAN}--fps{RESET} {YELLOW}N{RESET}            Frame rate to pass to rawcooked (e.g. {YELLOW}24{RESET}, {YELLOW}18{RESET}, {YELLOW}16{RESET},
+                     {YELLOW}23.976{RESET}). Required if the DPX header has no frame-rate
+                     metadata; overrides the header if present.
   {CYAN}-n{RESET}, {CYAN}--dry-run{RESET}       Print the rawcooked command, don't run it
   {CYAN}--force{RESET}             Pass {YELLOW}-y{RESET} to rawcooked — overwrite existing outputs
   {CYAN}--{RESET} {YELLOW}EXTRA...{RESET}        Anything after {CYAN}--{RESET} is passed to rawcooked verbatim
-                     (e.g. {YELLOW}--no-check-padding{RESET}, {YELLOW}-framerate 24{RESET})
+                     (e.g. {YELLOW}--no-check-padding{RESET})
   {CYAN}-h{RESET}, {CYAN}--help{RESET}          Show this help
 
 {BOLD}{BLUE}MODES{RESET}
@@ -691,6 +694,7 @@ def main() -> int:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("-i", "--input")
     p.add_argument("-o", "--output")
+    p.add_argument("--fps")
     p.add_argument("-n", "--dry-run", action="store_true")
     p.add_argument("--force", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
@@ -717,9 +721,32 @@ def main() -> int:
     output = Path(args.output) if args.output else default_output(in_path, mode)
     log_path = Path(str(output) + ".log")
 
+    # Frame rate resolution (encode mode only). If --fps wasn't given, probe the first
+    # DPX header. If the header lacks metadata too, refuse to proceed rather than let
+    # rawcooked silently default to 24 fps — that default could be wrong for the content.
+    framerate_source = ""
+    if mode == "encode":
+        if args.fps:
+            framerate_source = "from --fps flag"
+        else:
+            probe = probe_framerate_source(in_path)
+            if probe == "from DPX header":
+                framerate_source = "from DPX header"
+            else:
+                log.error("DPX headers contain no frame rate metadata.")
+                log.error("RAWcooked would silently default to 24 fps — which could be wrong for the content.")
+                log.error("Specify --fps explicitly:")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 18     # silent film standard")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 16     # very early silent")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 24     # sound film standard")
+                log.error(f"  ./tools/rawcooked.py -i {shlex.quote(str(in_path))} --fps 23.976 # NTSC pulldown")
+                return 4
+
     cmd = ["rawcooked", "--all"]
     if args.force:
         cmd.append("-y")
+    if args.fps:
+        cmd.extend(["-framerate", str(args.fps)])
     cmd.extend(["-o", str(output), str(in_path)])
     cmd.extend(extras)
 
@@ -729,10 +756,6 @@ def main() -> int:
         return 0
 
     require("rawcooked")
-
-    framerate_source = ""
-    if mode == "encode":
-        framerate_source = probe_framerate_source(in_path)
 
     preflight_status = preflight(mode, in_path, output, log_path)
     if preflight_status != 0:
