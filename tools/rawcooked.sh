@@ -587,6 +587,9 @@ _tech_summary() {
         [[ -n "$md5" ]]    && echo "Output MD5:       $md5"
         [[ -n "$rc_ver" ]] && echo "RAWcooked ver.:   $rc_ver"
     } >> "$log"
+    # Explicit return so a trailing false `[[ -n "$x" ]] && ...` guard above
+    # (e.g. empty $rc_ver) doesn't propagate exit 1 through to set -e.
+    return 0
 }
 
 # ffmpeg pipeline section (encode only) — plain-English summary of what ffmpeg did.
@@ -642,6 +645,7 @@ _ffmpeg_summary() {
         echo "Color tag:        $color_tag RGB, $scan"
         [[ -n "$muxing" ]] && echo "Muxing overhead:  $muxing"
     } >> "$log"
+    return 0  # see comment on the same pattern in _tech_summary
 }
 
 # Post-flight: print summary banner to stderr, append log footer.
@@ -660,14 +664,19 @@ _postflight() {
     # Split total wall time into encode-phase and check-phase.
     # encode_wall comes from ffmpeg's final "elapsed=H:MM:SS" field in the log;
     # check_wall = total wall - encode_wall (the reversibility-check phase).
-    local encode_wall_str="" check_wall_str=""
+    # Also compute each phase's share of the total wall time as a percentage.
+    local encode_wall_str="" check_wall_str="" encode_pct="" check_pct=""
     local elapsed_field
     elapsed_field=$( (grep -oE 'elapsed=[0-9]+:[0-9]+:[0-9]+' "$log" 2>/dev/null || true) | tail -1 | sed 's/elapsed=//')
     if [[ "$elapsed_field" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
         local enc_secs=$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
         encode_wall_str=$(_fmt_duration "$enc_secs")
+        if (( duration > 0 )); then
+            encode_pct=$(awk -v e="$enc_secs" -v d="$duration" 'BEGIN { printf "%.0f", e/d*100 }')
+        fi
         if (( duration > enc_secs )); then
             check_wall_str=$(_fmt_duration $((duration - enc_secs)))
+            [[ -n "$encode_pct" ]] && check_pct=$((100 - encode_pct))
         fi
     fi
 
@@ -695,8 +704,19 @@ _postflight() {
         printf '  %sStarted:%s          %s\n' "${CYAN}" "${RESET}" "$start_et"
         printf '  %sFinished:%s         %s\n' "${CYAN}" "${RESET}" "$end_et"
         if [[ "$mode" == "encode" && -n "$encode_wall_str" ]]; then
-            printf '  %sEncode duration:%s  %s\n' "${CYAN}" "${RESET}" "$encode_wall_str"
-            [[ -n "$check_wall_str" ]] && printf '  %sCheck duration:%s   %s\n' "${CYAN}" "${RESET}" "$check_wall_str"
+            if [[ -n "$encode_pct" ]]; then
+                printf '  %sEncode duration:%s  %s  (%s%% of total processing time)\n' "${CYAN}" "${RESET}" "$encode_wall_str" "$encode_pct"
+            else
+                printf '  %sEncode duration:%s  %s\n' "${CYAN}" "${RESET}" "$encode_wall_str"
+            fi
+            if [[ -n "$check_wall_str" ]]; then
+                if [[ -n "$check_pct" ]]; then
+                    printf '  %sCheck duration:%s   %s  (%s%% of total processing time)\n' "${CYAN}" "${RESET}" "$check_wall_str" "$check_pct"
+                else
+                    printf '  %sCheck duration:%s   %s\n' "${CYAN}" "${RESET}" "$check_wall_str"
+                fi
+            fi
+            printf '  %sTotal processing time:%s  %s\n' "${CYAN}" "${RESET}" "$total_dur_str"
         else
             printf '  %sDecode duration:%s  %s\n' "${CYAN}" "${RESET}" "$total_dur_str"
         fi
@@ -718,8 +738,19 @@ _postflight() {
         printf '%-19s %s\n' "Started:"  "$start_et"
         printf '%-19s %s\n' "Finished:" "$end_et"
         if [[ "$mode" == "encode" && -n "$encode_wall_str" ]]; then
-            printf '%-19s %s\n' "Encode duration:" "$encode_wall_str"
-            [[ -n "$check_wall_str" ]] && printf '%-19s %s\n' "Check duration:" "$check_wall_str"
+            if [[ -n "$encode_pct" ]]; then
+                printf '%-19s %s  (%s%% of total processing time)\n' "Encode duration:" "$encode_wall_str" "$encode_pct"
+            else
+                printf '%-19s %s\n' "Encode duration:" "$encode_wall_str"
+            fi
+            if [[ -n "$check_wall_str" ]]; then
+                if [[ -n "$check_pct" ]]; then
+                    printf '%-19s %s  (%s%% of total processing time)\n' "Check duration:" "$check_wall_str" "$check_pct"
+                else
+                    printf '%-19s %s\n' "Check duration:" "$check_wall_str"
+                fi
+            fi
+            printf '%-19s %s\n' "Total processing time:" "$total_dur_str"
         else
             printf '%-19s %s\n' "Decode duration:" "$total_dur_str"
         fi
@@ -730,6 +761,7 @@ _postflight() {
             printf '%-19s %s\n' "Output MD5:" "$md5"
         fi
     } >> "$log"
+    return 0  # see comment on the same pattern in _tech_summary
 }
 
 main() {

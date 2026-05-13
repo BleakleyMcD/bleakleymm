@@ -632,20 +632,27 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
     md5 = ""
     encode_wall_str = ""
     check_wall_str = ""
+    encode_pct = ""
+    check_pct = ""
     try:
         content = log_path.read_text(errors="replace")
         m = re.search(r"Output file MD5 is ([a-f0-9]+)", content)
         if m:
             md5 = m.group(1)
         # Split total wall time into encode-phase + check-phase using ffmpeg's "elapsed="
-        # field from the final frame= progress line in the captured log.
+        # field from the final frame= progress line in the captured log. Compute each
+        # phase's share of the total wall time as a percentage.
         elapsed_matches = re.findall(r"elapsed=(\d+):(\d+):(\d+)", content)
         if elapsed_matches:
             h, mn, s = (int(x) for x in elapsed_matches[-1])
             enc_secs = h * 3600 + mn * 60 + s
             encode_wall_str = fmt_duration(enc_secs)
+            if duration > 0:
+                encode_pct = f"{round(enc_secs / duration * 100)}"
             if duration > enc_secs:
                 check_wall_str = fmt_duration(duration - enc_secs)
+                if encode_pct:
+                    check_pct = f"{100 - int(encode_pct)}"
     except OSError:
         pass
 
@@ -664,9 +671,18 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
     print(f"  {CYAN}Started:{RESET}          {start_et}", file=sys.stderr)
     print(f"  {CYAN}Finished:{RESET}         {end_et}", file=sys.stderr)
     if mode == "encode" and encode_wall_str:
-        print(f"  {CYAN}Encode duration:{RESET}  {encode_wall_str}", file=sys.stderr)
+        if encode_pct:
+            print(f"  {CYAN}Encode duration:{RESET}  {encode_wall_str}  ({encode_pct}% of total processing time)",
+                  file=sys.stderr)
+        else:
+            print(f"  {CYAN}Encode duration:{RESET}  {encode_wall_str}", file=sys.stderr)
         if check_wall_str:
-            print(f"  {CYAN}Check duration:{RESET}   {check_wall_str}", file=sys.stderr)
+            if check_pct:
+                print(f"  {CYAN}Check duration:{RESET}   {check_wall_str}  ({check_pct}% of total processing time)",
+                      file=sys.stderr)
+            else:
+                print(f"  {CYAN}Check duration:{RESET}   {check_wall_str}", file=sys.stderr)
+        print(f"  {CYAN}Total processing time:{RESET}  {total_dur_str}", file=sys.stderr)
     else:
         print(f"  {CYAN}Decode duration:{RESET}  {total_dur_str}", file=sys.stderr)
     print(f"  {CYAN}{output_label}:{RESET}      {output}", file=sys.stderr)
@@ -684,9 +700,16 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
         fh.write(f"{'Started:':<19} {start_et}\n")
         fh.write(f"{'Finished:':<19} {end_et}\n")
         if mode == "encode" and encode_wall_str:
-            fh.write(f"{'Encode duration:':<19} {encode_wall_str}\n")
+            if encode_pct:
+                fh.write(f"{'Encode duration:':<19} {encode_wall_str}  ({encode_pct}% of total processing time)\n")
+            else:
+                fh.write(f"{'Encode duration:':<19} {encode_wall_str}\n")
             if check_wall_str:
-                fh.write(f"{'Check duration:':<19} {check_wall_str}\n")
+                if check_pct:
+                    fh.write(f"{'Check duration:':<19} {check_wall_str}  ({check_pct}% of total processing time)\n")
+                else:
+                    fh.write(f"{'Check duration:':<19} {check_wall_str}\n")
+            fh.write(f"{'Total processing time:':<19} {total_dur_str}\n")
         else:
             fh.write(f"{'Decode duration:':<19} {total_dur_str}\n")
         fh.write(f"{'Exit:':<19} {status} ({status_word})\n")
