@@ -422,14 +422,20 @@ def tech_summary(log_path: Path, framerate_source: str) -> None:
     enc_m = re.search(r"speed=\s*([\d.]+x)", progress)
     encode_speed = enc_m.group(1) if enc_m else ""
 
+    # rawcooked's Time= progress and final overall-throughput updates use \r to overwrite
+    # in place. In the log they end up concatenated on a single \n-terminated line, which
+    # defeats line-based regex with MULTILINE. Normalize \r -> \n so each update is its
+    # own line before parsing check/overall fields.
+    text_lines = text.replace("\r", "\n")
+
     # Check speed (reversibility pass): from the final rawcooked "Time=..." progress line.
-    time_lines = re.findall(r"^Time=.*$", text, re.MULTILINE)
+    time_lines = re.findall(r"^Time=.*$", text_lines, re.MULTILINE)
     check_line = time_lines[-1] if time_lines else ""
     chk_m = re.search(r"([\d.]+x realtime)", check_line)
     check_speed = chk_m.group(1) if chk_m else ""
 
     # Overall throughput: rawcooked's final "N.N MiB/s, N.NNx realtime" line (not the Time= lines).
-    overall_lines = [ln for ln in re.findall(r".*realtime.*", text)
+    overall_lines = [ln for ln in re.findall(r"^.*realtime.*$", text_lines, re.MULTILINE)
                      if not ln.startswith("Time=")]
     overall_line = overall_lines[-1] if overall_lines else ""
     tp_m = re.search(r"([\d.]+ MiB/s)", overall_line)

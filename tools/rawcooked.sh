@@ -439,14 +439,21 @@ _tech_summary() {
     local encode_speed
     encode_speed=$(grep -oE 'speed=[[:space:]]*[0-9.]+x' <<< "$progress_line" | grep -oE '[0-9.]+x' || true)
 
+    # rawcooked's Time= progress and final overall-throughput lines are emitted with \r
+    # (carriage return) to update in place. In the log they end up concatenated onto a
+    # single \n-terminated line, which defeats line-based grep filters. Normalize \r to
+    # \n so each update is its own searchable line before parsing the check/overall fields.
+    local log_lines
+    log_lines=$(tr '\r' '\n' < "$log" 2>/dev/null || true)
+
     # Check speed (reversibility pass): from the final rawcooked "Time=..." progress line.
     local check_line check_speed
-    check_line=$(grep -E '^Time=' "$log" 2>/dev/null | tail -1 || true)
+    check_line=$(grep -E '^Time=' <<< "$log_lines" | tail -1 || true)
     check_speed=$(grep -oE '[0-9.]+x realtime' <<< "$check_line" | head -1 || true)
 
     # Overall throughput: rawcooked's final "N.N MiB/s, N.NNx realtime" line (not the Time= ones).
     local overall_line overall_throughput overall_speed
-    overall_line=$(grep -E 'realtime' "$log" 2>/dev/null | grep -v '^Time=' | tail -1 || true)
+    overall_line=$(grep -E 'realtime' <<< "$log_lines" | grep -v '^Time=' | tail -1 || true)
     overall_throughput=$(grep -oE '[0-9.]+ MiB/s' <<< "$overall_line" | head -1 || true)
     overall_speed=$(grep -oE '[0-9.]+x realtime' <<< "$overall_line" | head -1 || true)
 
