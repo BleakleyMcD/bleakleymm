@@ -402,27 +402,29 @@ _preflight() {
 _tech_summary() {
     local log="$1" framerate_source="$2" total_wall="${3:-0}"
 
+    # All grep|sed|awk pipelines below tolerate no-match without aborting set -e.
     local raw_format pretty_format
-    raw_format=$(grep -m1 -E '^[[:space:]]*(DPX|TIFF|EXR)/' "$log" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    raw_format=$( (grep -m1 -E '^[[:space:]]*(DPX|TIFF|EXR)/' "$log" 2>/dev/null || true) \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     pretty_format=$(_decode_format "$raw_format")
 
     local input_stream resolution fps
     input_stream=$(grep -m1 -E 'Stream #0:0:.*Video:.*dpx' "$log" 2>/dev/null || true)
-    resolution=$(grep -oE '[0-9]+x[0-9]+' <<< "$input_stream" | head -1 | sed 's/x/ × /')
-    fps=$(grep -oE '[0-9.]+ fps' <<< "$input_stream" | head -1 | awk '{print $1}')
+    resolution=$(grep -oE '[0-9]+x[0-9]+' <<< "$input_stream" | head -1 | sed 's/x/ × /' || true)
+    fps=$(grep -oE '[0-9.]+ fps' <<< "$input_stream" | head -1 | awk '{print $1}' || true)
 
     local progress_line frame_count lsize_kib bitrate_kbps
-    progress_line=$(grep -E '^frame=' "$log" 2>/dev/null | tail -1)
-    frame_count=$(sed -nE 's/^frame=[[:space:]]*([0-9]+).*/\1/p' <<< "$progress_line")
-    lsize_kib=$(sed -nE 's/.*Lsize=[[:space:]]*([0-9]+)KiB.*/\1/p' <<< "$progress_line")
-    bitrate_kbps=$(sed -nE 's/.*bitrate=[[:space:]]*([0-9.]+)kbits\/s.*/\1/p' <<< "$progress_line")
+    progress_line=$( (grep -E '^frame=' "$log" 2>/dev/null || true) | tail -1)
+    frame_count=$(sed -nE 's/^frame=[[:space:]]*([0-9]+).*/\1/p' <<< "$progress_line" || true)
+    lsize_kib=$(sed -nE 's/.*Lsize=[[:space:]]*([0-9]+)KiB.*/\1/p' <<< "$progress_line" || true)
+    bitrate_kbps=$(sed -nE 's/.*bitrate=[[:space:]]*([0-9.]+)kbits\/s.*/\1/p' <<< "$progress_line" || true)
 
     local output_size bitrate_mbps
     output_size=$(_human_kib "$lsize_kib")
     bitrate_mbps=$(awk -v k="$bitrate_kbps" 'BEGIN { if (k != "") printf "%.0f", k/1000 }')
 
     local duration_str content_pretty
-    duration_str=$(grep -m1 -E 'Duration: *[0-9]+:[0-9]+:[0-9.]+' "$log" 2>/dev/null \
+    duration_str=$( (grep -m1 -E 'Duration: *[0-9]+:[0-9]+:[0-9.]+' "$log" 2>/dev/null || true) \
         | sed -nE 's/.*Duration: *([0-9]+:[0-9]+:[0-9.]+).*/\1/p' | head -1)
     if [[ "$duration_str" =~ ^([0-9]+):([0-9]+):([0-9.]+)$ ]]; then
         local h=$((10#${BASH_REMATCH[1]})) m=$((10#${BASH_REMATCH[2]})) s="${BASH_REMATCH[3]}"
@@ -505,9 +507,9 @@ _tech_summary() {
     fi
 
     local md5 rc_ver
-    md5=$(grep -oE 'Output file MD5 is [a-f0-9]+' "$log" 2>/dev/null | awk '{print $NF}' | head -1)
+    md5=$( (grep -oE 'Output file MD5 is [a-f0-9]+' "$log" 2>/dev/null || true) | awk '{print $NF}' | head -1)
     # Match the version number specifically, not the trailing period after it.
-    rc_ver=$(grep -m1 -oE 'created by RAWcooked [0-9]+(\.[0-9]+)*' "$log" 2>/dev/null | awk '{print $NF}')
+    rc_ver=$( (grep -m1 -oE 'created by RAWcooked [0-9]+(\.[0-9]+)*' "$log" 2>/dev/null || true) | awk '{print $NF}')
 
     local fc_pretty="$frame_count"
     if [[ -n "$frame_count" ]]; then
@@ -518,7 +520,7 @@ _tech_summary() {
     {
         echo ""
         printf '%s%s%s\n' "${BLUE}" "$_DSEP" "${RESET}"
-        echo "  Technical Summary"
+        printf '  Technical Summary      %s(Check speed = Reversibility check)%s\n' "${DIM}" "${RESET}"
         printf '%s%s%s\n' "${BLUE}" "$_DSEP" "${RESET}"
         [[ -n "$pretty_format" ]] && printf '  %sSource format:%s    %s\n' "${CYAN}" "${RESET}" "$pretty_format"
                                      printf '  %sOutput codec:%s     FFV1 in Matroska\n' "${CYAN}" "${RESET}"
@@ -532,12 +534,12 @@ _tech_summary() {
         [[ -n "$encode_speed" ]] && printf '  %sEncode speed:%s     %s realtime (ffmpeg pass)\n' "${CYAN}" "${RESET}" "$encode_speed"
         if [[ -n "$check_first" && -n "$check_last" && "$check_first" != "$check_last" ]]; then
             if [[ -n "$check_avg" ]]; then
-                printf '  %sReversibility check speed:%s  %s → %s realtime (avg ~%sx)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last" "$check_avg"
+                printf '  %sCheck speed:%s      %s → %s realtime (avg ~%sx)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last" "$check_avg"
             else
-                printf '  %sReversibility check speed:%s  %s → %s realtime (start → end)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last"
+                printf '  %sCheck speed:%s      %s → %s realtime (start → end)\n' "${CYAN}" "${RESET}" "$check_first" "$check_last"
             fi
         elif [[ -n "$check_last" ]]; then
-            printf '  %sReversibility check speed:%s  %s realtime\n' "${CYAN}" "${RESET}" "$check_last"
+            printf '  %sCheck speed:%s      %s realtime\n' "${CYAN}" "${RESET}" "$check_last"
         fi
         if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
             printf '  %sOverall:%s          %s (%s)\n' "${CYAN}" "${RESET}" "$overall_speed" "$overall_throughput"
@@ -554,7 +556,7 @@ _tech_summary() {
     # Log (plain)
     {
         echo ""
-        echo "Technical Summary"
+        echo "Technical Summary      (Check speed = Reversibility check)"
         echo "-----------------"
         [[ -n "$pretty_format" ]] && echo "Source format:    $pretty_format"
                                      echo "Output codec:     FFV1 in Matroska"
@@ -568,12 +570,12 @@ _tech_summary() {
         [[ -n "$encode_speed" ]] && echo "Encode speed:     $encode_speed realtime (ffmpeg pass)"
         if [[ -n "$check_first" && -n "$check_last" && "$check_first" != "$check_last" ]]; then
             if [[ -n "$check_avg" ]]; then
-                echo "Reversibility check speed:  $check_first → $check_last realtime (avg ~${check_avg}x)"
+                echo "Check speed:      $check_first → $check_last realtime (avg ~${check_avg}x)"
             else
-                echo "Reversibility check speed:  $check_first → $check_last realtime (start → end)"
+                echo "Check speed:      $check_first → $check_last realtime (start → end)"
             fi
         elif [[ -n "$check_last" ]]; then
-            echo "Reversibility check speed:  $check_last realtime"
+            echo "Check speed:      $check_last realtime"
         fi
         if [[ -n "$overall_speed" && -n "$overall_throughput" ]]; then
             echo "Overall:          $overall_speed ($overall_throughput)"
@@ -592,10 +594,10 @@ _tech_summary() {
 _ffmpeg_summary() {
     local log="$1"
     local ffmpeg_ver libavcodec libavformat
-    ffmpeg_ver=$(grep -m1 'ffmpeg version' "$log" 2>/dev/null | awk '{print $3}')
+    ffmpeg_ver=$( (grep -m1 'ffmpeg version' "$log" 2>/dev/null || true) | awk '{print $3}')
     # Lib version lines look like "  libavcodec     62. 11.100 / 62. 11.100" — join $2 and $3.
-    libavcodec=$(grep -m1 '^[[:space:]]*libavcodec' "$log" 2>/dev/null | awk '{print $2$3}')
-    libavformat=$(grep -m1 '^[[:space:]]*libavformat' "$log" 2>/dev/null | awk '{print $2$3}')
+    libavcodec=$( (grep -m1 '^[[:space:]]*libavcodec' "$log" 2>/dev/null || true) | awk '{print $2$3}')
+    libavformat=$( (grep -m1 '^[[:space:]]*libavformat' "$log" 2>/dev/null || true) | awk '{print $2$3}')
 
     local streams_desc
     if grep -q 'Attachment:' "$log" 2>/dev/null; then
@@ -606,12 +608,12 @@ _ffmpeg_summary() {
 
     local output_video color_tag scan
     output_video=$(grep -m1 -E 'Stream #0:0:.*Video: ffv1' "$log" 2>/dev/null || true)
-    color_tag=$(grep -oE 'bt[0-9]+' <<< "$output_video" | head -1 | tr '[:lower:]' '[:upper:]')
+    color_tag=$(grep -oE 'bt[0-9]+' <<< "$output_video" | head -1 | tr '[:lower:]' '[:upper:]' || true)
     [[ -z "$color_tag" ]] && color_tag="unspecified"
     if grep -q 'progressive' <<< "$output_video"; then scan="progressive"; else scan="interlaced/unknown"; fi
 
     local muxing
-    muxing=$(grep -m1 'muxing overhead' "$log" 2>/dev/null | grep -oE 'muxing overhead: [0-9.]+%' | awk '{print $NF}')
+    muxing=$( (grep -m1 'muxing overhead' "$log" 2>/dev/null || true) | grep -oE 'muxing overhead: [0-9.]+%' | awk '{print $NF}' || true)
 
     # Terminal
     {
@@ -649,23 +651,39 @@ _postflight() {
 
     local size="" md5=""
     if [[ -e "$output" ]]; then
-        size=$(du -sh "$output" 2>/dev/null | cut -f1)
+        # awk strips any leading whitespace some macOS `du -sh` outputs include
+        # (cut -f1 alone would preserve it and misalign the Summary column).
+        size=$(du -sh "$output" 2>/dev/null | awk '{print $1}')
     fi
-    md5=$(grep -oE 'Output file MD5 is [a-f0-9]+' "$log" 2>/dev/null | awk '{print $NF}' | head -1)
+    md5=$( (grep -oE 'Output file MD5 is [a-f0-9]+' "$log" 2>/dev/null || true) | awk '{print $NF}' | head -1)
 
-    local dur_str
-    dur_str=$(_fmt_duration "$duration")
+    # Split total wall time into encode-phase and check-phase.
+    # encode_wall comes from ffmpeg's final "elapsed=H:MM:SS" field in the log;
+    # check_wall = total wall - encode_wall (the reversibility-check phase).
+    local encode_wall_str="" check_wall_str=""
+    local elapsed_field
+    elapsed_field=$( (grep -oE 'elapsed=[0-9]+:[0-9]+:[0-9]+' "$log" 2>/dev/null || true) | tail -1 | sed 's/elapsed=//')
+    if [[ "$elapsed_field" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+        local enc_secs=$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
+        encode_wall_str=$(_fmt_duration "$enc_secs")
+        if (( duration > enc_secs )); then
+            check_wall_str=$(_fmt_duration $((duration - enc_secs)))
+        fi
+    fi
 
-    local status_color status_word duration_label output_label
+    local total_dur_str
+    total_dur_str=$(_fmt_duration "$duration")
+
+    local status_color status_word output_label
     if (( status == 0 )); then
         status_color="${GREEN}"; status_word="success"
     else
         status_color="${RED}";   status_word="FAILED (exit $status)"
     fi
     if [[ "$mode" == "encode" ]]; then
-        duration_label="Encode duration"; output_label="Output .mkv"
+        output_label="Output .mkv"
     else
-        duration_label="Decode duration"; output_label="Output dir"
+        output_label="Output dir"
     fi
 
     # Terminal banner. Bars bold/blue; "Summary" plain.
@@ -676,7 +694,12 @@ _postflight() {
         printf '%s%s%s\n' "${BOLD}${BLUE}" "$_SEP" "${RESET}"
         printf '  %sStarted:%s          %s\n' "${CYAN}" "${RESET}" "$start_et"
         printf '  %sFinished:%s         %s\n' "${CYAN}" "${RESET}" "$end_et"
-        printf '  %s%s:%s  %s\n' "${CYAN}" "$duration_label" "${RESET}" "$dur_str"
+        if [[ "$mode" == "encode" && -n "$encode_wall_str" ]]; then
+            printf '  %sEncode duration:%s  %s\n' "${CYAN}" "${RESET}" "$encode_wall_str"
+            [[ -n "$check_wall_str" ]] && printf '  %sCheck duration:%s   %s\n' "${CYAN}" "${RESET}" "$check_wall_str"
+        else
+            printf '  %sDecode duration:%s  %s\n' "${CYAN}" "${RESET}" "$total_dur_str"
+        fi
         printf '  %s%s:%s      %s\n' "${CYAN}" "$output_label" "${RESET}" "$output"
         [[ -n "$size" ]] && printf '  %sOutput size:%s      %s\n' "${CYAN}" "${RESET}" "$size"
         if [[ "$mode" == "encode" && -n "$md5" ]]; then
@@ -692,12 +715,17 @@ _postflight() {
         echo ""
         echo "Summary"
         echo "-------"
-        printf '%-19s %s\n' "Started:"             "$start_et"
-        printf '%-19s %s\n' "Finished:"            "$end_et"
-        printf '%-19s %s\n' "${duration_label}:"   "$dur_str"
-        printf '%-19s %s\n' "Exit:"                "$status ($status_word)"
-        printf '%-19s %s\n' "${output_label}:"     "$output"
-        [[ -n "$size" ]] && printf '%-19s %s\n' "Output size:"  "$size"
+        printf '%-19s %s\n' "Started:"  "$start_et"
+        printf '%-19s %s\n' "Finished:" "$end_et"
+        if [[ "$mode" == "encode" && -n "$encode_wall_str" ]]; then
+            printf '%-19s %s\n' "Encode duration:" "$encode_wall_str"
+            [[ -n "$check_wall_str" ]] && printf '%-19s %s\n' "Check duration:" "$check_wall_str"
+        else
+            printf '%-19s %s\n' "Decode duration:" "$total_dur_str"
+        fi
+        printf '%-19s %s\n' "Exit:"            "$status ($status_word)"
+        printf '%-19s %s\n' "${output_label}:" "$output"
+        [[ -n "$size" ]] && printf '%-19s %s\n' "Output size:" "$size"
         if [[ "$mode" == "encode" && -n "$md5" ]]; then
             printf '%-19s %s\n' "Output MD5:" "$md5"
         fi

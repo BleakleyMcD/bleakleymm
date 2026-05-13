@@ -490,7 +490,7 @@ def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> 
     # Terminal
     print(file=sys.stderr)
     print(f"{BLUE}{DSEP}{RESET}", file=sys.stderr)
-    print(f"  Technical Summary", file=sys.stderr)
+    print(f"  Technical Summary      {DIM}(Check speed = Reversibility check){RESET}", file=sys.stderr)
     print(f"{BLUE}{DSEP}{RESET}", file=sys.stderr)
     if pretty_format:
         print(f"  {CYAN}Source format:{RESET}    {pretty_format}", file=sys.stderr)
@@ -512,13 +512,13 @@ def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> 
         print(f"  {CYAN}Encode speed:{RESET}     {encode_speed} realtime (ffmpeg pass)", file=sys.stderr)
     if check_first and check_last and check_first != check_last:
         if check_avg:
-            print(f"  {CYAN}Reversibility check speed:{RESET}  {check_first}x → {check_last}x realtime (avg ~{check_avg}x)",
+            print(f"  {CYAN}Check speed:{RESET}      {check_first}x → {check_last}x realtime (avg ~{check_avg}x)",
                   file=sys.stderr)
         else:
-            print(f"  {CYAN}Reversibility check speed:{RESET}  {check_first}x → {check_last}x realtime (start → end)",
+            print(f"  {CYAN}Check speed:{RESET}      {check_first}x → {check_last}x realtime (start → end)",
                   file=sys.stderr)
     elif check_last:
-        print(f"  {CYAN}Reversibility check speed:{RESET}  {check_last}x realtime", file=sys.stderr)
+        print(f"  {CYAN}Check speed:{RESET}      {check_last}x realtime", file=sys.stderr)
     if overall_speed and overall_throughput:
         print(f"  {CYAN}Overall:{RESET}          {overall_speed} ({overall_throughput})", file=sys.stderr)
     elif overall_speed:
@@ -533,7 +533,7 @@ def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> 
 
     # Log (plain)
     with log_path.open("a") as fh:
-        fh.write("\nTechnical Summary\n")
+        fh.write("\nTechnical Summary      (Check speed = Reversibility check)\n")
         fh.write("-----------------\n")
         if pretty_format:
             fh.write(f"Source format:    {pretty_format}\n")
@@ -554,11 +554,11 @@ def tech_summary(log_path: Path, framerate_source: str, total_wall: int = 0) -> 
             fh.write(f"Encode speed:     {encode_speed} realtime (ffmpeg pass)\n")
         if check_first and check_last and check_first != check_last:
             if check_avg:
-                fh.write(f"Reversibility check speed:  {check_first}x → {check_last}x realtime (avg ~{check_avg}x)\n")
+                fh.write(f"Check speed:      {check_first}x → {check_last}x realtime (avg ~{check_avg}x)\n")
             else:
-                fh.write(f"Reversibility check speed:  {check_first}x → {check_last}x realtime (start → end)\n")
+                fh.write(f"Check speed:      {check_first}x → {check_last}x realtime (start → end)\n")
         elif check_last:
-            fh.write(f"Reversibility check speed:  {check_last}x realtime\n")
+            fh.write(f"Check speed:      {check_last}x realtime\n")
         if overall_speed and overall_throughput:
             fh.write(f"Overall:          {overall_speed} ({overall_throughput})\n")
         elif overall_speed:
@@ -630,23 +630,31 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
                mode: str, start_et: str, end_et: str) -> None:
     size = human_size(output) if output.exists() else ""
     md5 = ""
+    encode_wall_str = ""
+    check_wall_str = ""
     try:
         content = log_path.read_text(errors="replace")
         m = re.search(r"Output file MD5 is ([a-f0-9]+)", content)
         if m:
             md5 = m.group(1)
+        # Split total wall time into encode-phase + check-phase using ffmpeg's "elapsed="
+        # field from the final frame= progress line in the captured log.
+        elapsed_matches = re.findall(r"elapsed=(\d+):(\d+):(\d+)", content)
+        if elapsed_matches:
+            h, mn, s = (int(x) for x in elapsed_matches[-1])
+            enc_secs = h * 3600 + mn * 60 + s
+            encode_wall_str = fmt_duration(enc_secs)
+            if duration > enc_secs:
+                check_wall_str = fmt_duration(duration - enc_secs)
     except OSError:
         pass
 
-    dur_str = fmt_duration(duration)
+    total_dur_str = fmt_duration(duration)
     if status == 0:
         status_color, status_word = GREEN, "success"
     else:
         status_color, status_word = RED, f"FAILED (exit {status})"
-    if mode == "encode":
-        duration_label, output_label = "Encode duration", "Output .mkv"
-    else:
-        duration_label, output_label = "Decode duration", "Output dir"
+    output_label = "Output .mkv" if mode == "encode" else "Output dir"
 
     # Terminal banner. Bars bold/blue; "Summary" plain.
     print(file=sys.stderr)
@@ -655,7 +663,12 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
     print(f"{BOLD}{BLUE}{SEP}{RESET}", file=sys.stderr)
     print(f"  {CYAN}Started:{RESET}          {start_et}", file=sys.stderr)
     print(f"  {CYAN}Finished:{RESET}         {end_et}", file=sys.stderr)
-    print(f"  {CYAN}{duration_label}:{RESET}  {dur_str}", file=sys.stderr)
+    if mode == "encode" and encode_wall_str:
+        print(f"  {CYAN}Encode duration:{RESET}  {encode_wall_str}", file=sys.stderr)
+        if check_wall_str:
+            print(f"  {CYAN}Check duration:{RESET}   {check_wall_str}", file=sys.stderr)
+    else:
+        print(f"  {CYAN}Decode duration:{RESET}  {total_dur_str}", file=sys.stderr)
     print(f"  {CYAN}{output_label}:{RESET}      {output}", file=sys.stderr)
     if size:
         print(f"  {CYAN}Output size:{RESET}      {size}", file=sys.stderr)
@@ -670,7 +683,12 @@ def postflight(status: int, duration: int, output: Path, log_path: Path,
         fh.write("\nSummary\n-------\n")
         fh.write(f"{'Started:':<19} {start_et}\n")
         fh.write(f"{'Finished:':<19} {end_et}\n")
-        fh.write(f"{duration_label + ':':<19} {dur_str}\n")
+        if mode == "encode" and encode_wall_str:
+            fh.write(f"{'Encode duration:':<19} {encode_wall_str}\n")
+            if check_wall_str:
+                fh.write(f"{'Check duration:':<19} {check_wall_str}\n")
+        else:
+            fh.write(f"{'Decode duration:':<19} {total_dur_str}\n")
         fh.write(f"{'Exit:':<19} {status} ({status_word})\n")
         fh.write(f"{output_label + ':':<19} {output}\n")
         if size:
