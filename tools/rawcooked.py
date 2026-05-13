@@ -74,18 +74,19 @@ def print_help():
   {CYAN}-i{RESET} {YELLOW}PATH{RESET}            DPX sequence directory (encode) or {YELLOW}.mkv{RESET} file (decode)
   {CYAN}-o{RESET} {YELLOW}OUTPUT{RESET}          Output path. Default: rawcooked's default
                      ({YELLOW}${{input}}.mkv{RESET} on encode, {YELLOW}${{input}}.RAWcooked/{RESET} on decode).
-  {CYAN}--fps{RESET} {YELLOW}N{RESET}            Frame rate to pass to rawcooked (e.g. {YELLOW}24{RESET}, {YELLOW}18{RESET}, {YELLOW}16{RESET},
-                     {YELLOW}23.976{RESET}). Required if the DPX header has no frame-rate
-                     metadata; overrides the header if present.
-  {CYAN}-n{RESET}, {CYAN}--dry-run{RESET}       Print the rawcooked command, don't run it
-  {CYAN}--force{RESET}             Pass {YELLOW}-y{RESET} to rawcooked — overwrite existing outputs
+  {CYAN}--fps{RESET} {YELLOW}N{RESET}            Frame rate to pass to rawcooked. Any ffmpeg value works
+                     ({YELLOW}24{RESET}, {YELLOW}23.976{RESET}, {YELLOW}18{RESET}, {YELLOW}16{RESET}, {YELLOW}12{RESET}, {YELLOW}8{RESET}, etc.). Required if the
+                     DPX header has no frame-rate metadata; overrides the
+                     header if present.
+  {CYAN}-n{RESET}, {CYAN}--dry-run{RESET}      Print the rawcooked command, don't run it
+  {CYAN}--force{RESET}            Pass {YELLOW}-y{RESET} to rawcooked — overwrite existing outputs
   {CYAN}--{RESET} {YELLOW}EXTRA...{RESET}        Anything after {CYAN}--{RESET} is passed to rawcooked verbatim
                      (e.g. {YELLOW}--no-check-padding{RESET})
-  {CYAN}-h{RESET}, {CYAN}--help{RESET}          Show this help
+  {CYAN}-h{RESET}, {CYAN}--help{RESET}         Show this help
 
 {BOLD}{BLUE}MODES{RESET}
   {YELLOW}encode{RESET}  {CYAN}-i{RESET} is a directory → DPX sequence becomes one FFV1/Matroska {YELLOW}.mkv{RESET}
-  {YELLOW}decode{RESET}  {CYAN}-i{RESET} is a {YELLOW}.mkv{RESET}     → restore the original DPX sequence
+  {YELLOW}decode{RESET}  {CYAN}-i{RESET} is a {YELLOW}.mkv{RESET} → restore the original DPX sequence
 
 {BOLD}{BLUE}DEFAULTS{RESET}
   Wrapper always passes {YELLOW}--all{RESET} to rawcooked (NMAAHC preservation defaults:
@@ -734,17 +735,22 @@ def main() -> int:
                 framerate_source = "from DPX header"
             else:
                 qin = shlex.quote(str(in_path))
+                # fps values padded so the inline '#' comments align at the same column.
+                # "--fps 23.976" is the longest (12 chars), so pad shorter ones to match.
                 log.error(
                     "DPX headers contain no frame rate metadata.\n"
+                    "\n"
                     "RAWcooked would silently default to 24 fps — which could be wrong for the content.\n"
+                    "\n"
                     "Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction).\n"
+                    "\n"
                     "Common examples:\n"
                     f"  ./tools/rawcooked.py -i {qin} --fps 24      # sound film standard\n"
                     f"  ./tools/rawcooked.py -i {qin} --fps 23.976  # NTSC pulldown\n"
-                    f"  ./tools/rawcooked.py -i {qin} --fps 18      # other common speeds\n"
-                    f"  ./tools/rawcooked.py -i {qin} --fps 16\n"
-                    f"  ./tools/rawcooked.py -i {qin} --fps 12\n"
-                    f"  ./tools/rawcooked.py -i {qin} --fps 8"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 18      # other common silent speed\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 16      # other common silent speed\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 12      # less common silent speed\n"
+                    f"  ./tools/rawcooked.py -i {qin} --fps 8       # plausible"
                 )
                 return 4
 

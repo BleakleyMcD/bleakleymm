@@ -42,18 +42,19 @@ ${BOLD}${BLUE}OPTIONS${RESET}
   ${CYAN}-i${RESET} ${YELLOW}PATH${RESET}            DPX sequence directory (encode) or ${YELLOW}.mkv${RESET} file (decode)
   ${CYAN}-o${RESET} ${YELLOW}OUTPUT${RESET}          Output path. Default: rawcooked's default
                      (${YELLOW}\${input}.mkv${RESET} on encode, ${YELLOW}\${input}.RAWcooked/${RESET} on decode).
-  ${CYAN}--fps${RESET} ${YELLOW}N${RESET}            Frame rate to pass to rawcooked (e.g. ${YELLOW}24${RESET}, ${YELLOW}18${RESET}, ${YELLOW}16${RESET},
-                     ${YELLOW}23.976${RESET}). Required if the DPX header has no frame-rate
-                     metadata; overrides the header if present.
-  ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}       Print the rawcooked command, don't run it
-  ${CYAN}--force${RESET}             Pass ${YELLOW}-y${RESET} to rawcooked — overwrite existing outputs
+  ${CYAN}--fps${RESET} ${YELLOW}N${RESET}            Frame rate to pass to rawcooked. Any ffmpeg value works
+                     (${YELLOW}24${RESET}, ${YELLOW}23.976${RESET}, ${YELLOW}18${RESET}, ${YELLOW}16${RESET}, ${YELLOW}12${RESET}, ${YELLOW}8${RESET}, etc.). Required if the
+                     DPX header has no frame-rate metadata; overrides the
+                     header if present.
+  ${CYAN}-n${RESET}, ${CYAN}--dry-run${RESET}      Print the rawcooked command, don't run it
+  ${CYAN}--force${RESET}            Pass ${YELLOW}-y${RESET} to rawcooked — overwrite existing outputs
   ${CYAN}--${RESET} ${YELLOW}EXTRA...${RESET}        Anything after ${CYAN}--${RESET} is passed to rawcooked verbatim
                      (e.g. ${YELLOW}--no-check-padding${RESET})
-  ${CYAN}-h${RESET}, ${CYAN}--help${RESET}          Show this help
+  ${CYAN}-h${RESET}, ${CYAN}--help${RESET}         Show this help
 
 ${BOLD}${BLUE}MODES${RESET}
   ${YELLOW}encode${RESET}  ${CYAN}-i${RESET} is a directory → DPX sequence becomes one FFV1/Matroska ${YELLOW}.mkv${RESET}
-  ${YELLOW}decode${RESET}  ${CYAN}-i${RESET} is a ${YELLOW}.mkv${RESET}     → restore the original DPX sequence
+  ${YELLOW}decode${RESET}  ${CYAN}-i${RESET} is a ${YELLOW}.mkv${RESET} → restore the original DPX sequence
 
 ${BOLD}${BLUE}DEFAULTS${RESET}
   Wrapper always passes ${YELLOW}--all${RESET} to rawcooked (NMAAHC preservation defaults:
@@ -751,16 +752,21 @@ main() {
             else
                 local _qin
                 _qin=$(printf '%q' "$input")
+                # fps values padded so the inline '#' comments align at the same column.
+                # "--fps 23.976" is the longest (12 chars), so pad shorter ones to match.
                 tbm_error "DPX headers contain no frame rate metadata.
+
 RAWcooked would silently default to 24 fps — which could be wrong for the content.
+
 Specify --fps explicitly. Any value ffmpeg accepts works (integer, decimal, fraction).
+
 Common examples:
   ./tools/rawcooked.sh -i ${_qin} --fps 24      # sound film standard
   ./tools/rawcooked.sh -i ${_qin} --fps 23.976  # NTSC pulldown
-  ./tools/rawcooked.sh -i ${_qin} --fps 18      # other common speeds
-  ./tools/rawcooked.sh -i ${_qin} --fps 16
-  ./tools/rawcooked.sh -i ${_qin} --fps 12
-  ./tools/rawcooked.sh -i ${_qin} --fps 8"
+  ./tools/rawcooked.sh -i ${_qin} --fps 18      # other common silent speed
+  ./tools/rawcooked.sh -i ${_qin} --fps 16      # other common silent speed
+  ./tools/rawcooked.sh -i ${_qin} --fps 12      # less common silent speed
+  ./tools/rawcooked.sh -i ${_qin} --fps 8       # plausible"
                 exit 4
             fi
         fi
