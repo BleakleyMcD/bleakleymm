@@ -316,7 +316,7 @@ profile's last and first names.</p>
       {format_checkboxes}
     </div>
     <div class="helptext">Each selected format gets an <code>ACCESS/</code> + <code>PRESERVATION/</code>
-    pair and a pre-filled <code>&lt;format&gt;_Notes.txt</code> for the operator.</div>
+    pair and a pre-filled <code>&lt;format&gt;_Notes.txt</code> for the TBM preservationist to expound upon.</div>
   </fieldset>
 
   <button type="submit">Create session</button>
