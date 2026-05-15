@@ -134,7 +134,6 @@ def build_session(form: dict) -> dict:
             "last": form["last"],
         },
         "study_collection_number": form["study_collection_number"],
-        "inventory_number": form.get("inventory_number", ""),
         "formats": [{"id": f.id, "folder": f.folder} for f in selected],
         "gm_dir": str(gm_dir),
         "session_dir": str(session_dir),
@@ -267,6 +266,8 @@ button {{
   cursor: pointer; background: var(--accent); color: white;
 }}
 button.browse {{ padding: 0.45em 0.9em; background: #eee; color: var(--fg); border: 1px solid var(--border); }}
+button.abort {{ background: var(--err); }}
+.actions {{ display: flex; gap: 0.6em; align-items: center; margin-top: 0.5em; }}
 button:hover {{ opacity: 0.9; }}
 .namecheck {{ font-family: ui-monospace, monospace; color: var(--muted); font-size: 0.88em; margin-top: 0.3em; }}
 </style>
@@ -289,12 +290,7 @@ profile's last and first names.</p>
     <label>
       <span>Study collection number *</span>
       <input type="text" name="study_collection_number" value="{scn}" placeholder="SC.0001" required>
-      <div class="helptext">Format like <code>SC.0001</code>. The dot is converted to an underscore in filenames (e.g. <code>SC_0001</code>).</div>
-    </label>
-    <label>
-      <span>Inventory number</span>
-      <input type="text" name="inventory_number" value="{inv}" placeholder="optional">
-      <div class="helptext">Optional. Leave blank if not applicable; downstream tools will skip it.</div>
+      <div class="helptext">Default is <code>SC.0001</code> — only change this if the study collection number is something else. The dot is converted to an underscore in filenames (e.g. <code>SC_0001</code>).</div>
     </label>
   </fieldset>
 
@@ -319,7 +315,10 @@ profile's last and first names.</p>
     pair and a pre-filled <code>&lt;format&gt;_Notes.txt</code> for the TBM preservationist to expound upon.</div>
   </fieldset>
 
-  <button type="submit">Create session</button>
+  <div class="actions">
+    <button type="submit">Create session</button>
+    <button type="button" class="abort" onclick="abortSession()">Abort</button>
+  </div>
 </form>
 
 <script>
@@ -332,6 +331,14 @@ async function browseDir() {{
   }} catch (e) {{
     alert('Browse failed: ' + e + '\\nType or paste the directory path instead.');
   }}
+}}
+
+async function abortSession() {{
+  if (!confirm('Abort? Nothing will be created and you will return to the terminal.')) return;
+  try {{
+    await fetch('/abort', {{method: 'POST'}});
+  }} catch (e) {{ /* server exits right after; fetch may not resolve cleanly */ }}
+  window.close();
 }}
 </script>
 
@@ -354,6 +361,10 @@ body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 760px;
 code {{ font-family: ui-monospace, monospace; background: #f3f3f3; padding: 1px 4px;
        border-radius: 3px; }}
 pre {{ background: #f3f3f3; padding: 1em; border-radius: 4px; overflow-x: auto; }}
+button {{ padding: 0.6em 1.4em; font-size: 1em; border-radius: 4px; border: 0;
+         cursor: pointer; background: #2466b8; color: white; margin-top: 0.8em; }}
+button:hover {{ opacity: 0.9; }}
+.fallback {{ color: #666; font-size: 0.9em; margin-top: 0.6em; }}
 </style>
 </head>
 <body>
@@ -361,10 +372,23 @@ pre {{ background: #f3f3f3; padding: 1em; border-radius: 4px; overflow-x: auto; 
 <h1>Session created</h1>
 <p>Created session for <strong>{first} {last}</strong> at:</p>
 <p><code>{session_dir}</code></p>
-<p>You can close this tab and return to the terminal.</p>
+<button onclick="exitNow()">Exit</button>
+<p id="fallback" class="fallback" style="display:none;">
+  Your browser blocked auto-close. Press <kbd>⌘W</kbd> to close this tab.
+</p>
 </div>
 <h3>session.json:</h3>
 <pre>{session_json}</pre>
+<script>
+function exitNow() {{
+  window.close();
+  // window.close() is a no-op in browsers when the tab wasn't script-opened.
+  // Show the keyboard-shortcut hint after a brief delay if we're still here.
+  setTimeout(function() {{
+    document.getElementById('fallback').style.display = 'block';
+  }}, 300);
+}}
+</script>
 </body>
 </html>
 """
@@ -392,8 +416,7 @@ def render_form(defaults: dict, errors: list[str] | None = None) -> str:
         last=defaults.get("last", ""),
         first=defaults.get("first", ""),
         operator=defaults.get("operator", ""),
-        scn=defaults.get("study_collection_number", ""),
-        inv=defaults.get("inventory_number", ""),
+        scn=defaults.get("study_collection_number", "SC.0001"),
         gm_dir=defaults.get("gm_dir", ""),
         today=date_iso(),
         format_checkboxes=format_checkboxes,
@@ -417,6 +440,7 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
     # Class-level shared state — set by run_form_server() before serving.
     submitted_session: dict | None = None
     submission_event: threading.Event | None = None
+    aborted: bool = False
 
     def log_message(self, format, *args):  # noqa: A002 — match BaseHTTPRequestHandler signature
         # Quiet — don't spam stderr with one line per request.
@@ -439,6 +463,12 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found\n")
 
     def do_POST(self):  # noqa: N802
+        if self.path == "/abort":
+            self._send(200, "text/plain", b"aborted\n")
+            _FormHandler.aborted = True
+            if _FormHandler.submission_event is not None:
+                _FormHandler.submission_event.set()
+            return
         if self.path != "/submit":
             self._send(404, "text/plain", b"not found\n")
             return
@@ -450,7 +480,6 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
             "last": raw.get("last", [""])[0].strip(),
             "operator": raw.get("operator", [""])[0].strip(),
             "study_collection_number": raw.get("study_collection_number", [""])[0].strip(),
-            "inventory_number": raw.get("inventory_number", [""])[0].strip(),
             "gm_dir": raw.get("gm_dir", [""])[0].strip(),
             "formats": [f.id for f in FORMATS if f"fmt_{f.id}" in raw],
         }
@@ -492,9 +521,10 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
 
 def run_form_server() -> dict:
     """Start the form server, open a browser, block until the form is submitted.
-    Returns the validated session dict."""
+    Returns the validated session dict. Exits the process if the user aborts."""
     _FormHandler.submitted_session = None
     _FormHandler.submission_event = threading.Event()
+    _FormHandler.aborted = False
     server = http.server.HTTPServer(("127.0.0.1", 0), _FormHandler)
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/"
@@ -506,11 +536,15 @@ def run_form_server() -> dict:
         _FormHandler.submission_event.wait()
     except KeyboardInterrupt:
         log.warning("Cancelled — no session created.")
-        server.shutdown()
         sys.exit(130)
-    # Give the browser a moment to finish receiving the success page.
-    time.sleep(0.5)
-    server.shutdown()
+    # Brief pause so the response bytes finish flushing to the browser before
+    # we exit. We deliberately don't call server.shutdown() — the browser holds
+    # the TCP connection open and shutdown() blocks on it. The serve_forever
+    # thread is a daemon and dies cleanly when the process exits.
+    time.sleep(0.3)
+    if _FormHandler.aborted:
+        log.warning("Aborted from browser — no session created.")
+        sys.exit(130)
     return _FormHandler.submitted_session  # type: ignore[return-value]
 
 
@@ -548,8 +582,7 @@ def run_cli_form() -> dict:
     last = _ask("Last name of Great Migration appointment", required=True)
     first = _ask("First name of Great Migration appointment", required=True)
     operator = _ask("Name of the TBM preservationist running the appointment", required=True)
-    scn = _ask("Study collection number (e.g. SC.0001)", required=True)
-    inv = _ask("Inventory number (optional, blank to skip)")
+    scn = _ask("Study collection number (press enter to accept default)", default="SC.0001", required=True)
     gm_dir = _ask("Great Migration root directory path", required=True)
 
     print("\nFormats to digitize this session (mark each y/N):")
@@ -563,7 +596,7 @@ def run_cli_form() -> dict:
 
     form = {
         "first": first, "last": last, "operator": operator,
-        "study_collection_number": scn, "inventory_number": inv,
+        "study_collection_number": scn,
         "gm_dir": gm_dir, "formats": selected,
     }
     errors = validate(form)
@@ -577,6 +610,24 @@ def run_cli_form() -> dict:
 
 # --- Top-level actions ---------------------------------------------------------
 
+def _print_tree(root: Path) -> None:
+    """Print an ASCII directory tree rooted at `root` to stdout."""
+    print(f"{root}/")
+    _print_tree_children(root, prefix="")
+
+
+def _print_tree_children(parent: Path, prefix: str) -> None:
+    children = sorted(parent.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    for i, child in enumerate(children):
+        is_last = i == len(children) - 1
+        branch = "└── " if is_last else "├── "
+        suffix = "/" if child.is_dir() else ""
+        print(f"{prefix}{branch}{child.name}{suffix}")
+        if child.is_dir():
+            extension = "    " if is_last else "│   "
+            _print_tree_children(child, prefix + extension)
+
+
 def do_session_creation(session: dict, *, create_dirs: bool) -> int:
     """Write session.json (always); create per-format dirs (if requested).
     Logs what was done; returns 0 on success."""
@@ -585,13 +636,11 @@ def do_session_creation(session: dict, *, create_dirs: bool) -> int:
         log.warning(f"Session dir already exists with content: {session_dir}")
 
     json_path = write_session_json(session)
-    log.info(f"Wrote {json_path}")
 
     if create_dirs:
-        created = create_session_dirs(session)
-        for c in created:
-            log.info(f"Created {c}")
+        create_session_dirs(session)
         log.info(f"Done. Session ready at {session_dir}")
+        _print_tree(session_dir)
     else:
         log.info(f"Skipped dir creation (--config-only). Session.json at {json_path}")
     return 0
