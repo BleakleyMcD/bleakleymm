@@ -16,6 +16,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import base64
 import http.server
 import json
 import shlex
@@ -220,6 +221,23 @@ def validate(form: dict) -> list[str]:
 
 # --- HTML form -----------------------------------------------------------------
 
+def _load_logo_data_uri() -> str:
+    """Read tools/assets/nmaahc_logo.png and return it as a data: URI, or empty
+    string if the file is missing. Embedded inline so the form is self-contained."""
+    p = Path(__file__).resolve().parent / "assets" / "nmaahc_logo.png"
+    if not p.exists():
+        return ""
+    return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode("ascii")
+
+
+LOGO_DATA_URI = _load_logo_data_uri()
+LOGO_HTML = (
+    f'<div class="logo-bar"><img src="{LOGO_DATA_URI}" '
+    f'alt="National Museum of African American History &amp; Culture / Smithsonian"></div>'
+    if LOGO_DATA_URI else ""
+)
+
+
 # CSS + form HTML. Doubled braces escape Python's str.format substitution.
 FORM_HTML = """\
 <!doctype html>
@@ -230,8 +248,10 @@ FORM_HTML = """\
 <style>
 :root {{
   --fg: #222; --muted: #666; --bg: #fafafa; --card: #fff;
-  --border: #ccc; --accent: #2466b8; --err: #c0392b; --errbg: #fdecea;
+  --border: #ccc; --accent: #582C83; --err: #c0392b; --errbg: #fdecea;
 }}
+.logo-bar {{ text-align: center; margin: 0 0 1.5em; }}
+.logo-bar img {{ max-width: 420px; width: 100%; height: auto; }}
 body {{
   font-family: -apple-system, system-ui, "Helvetica Neue", sans-serif;
   color: var(--fg); background: var(--bg);
@@ -273,6 +293,7 @@ button:hover {{ opacity: 0.9; }}
 </style>
 </head>
 <body>
+{logo_html}
 <h1>Great Migration appointment</h1>
 <p>Fill out the fields below to set up a new digitization session. A new directory
 will be created under your selected output location, named after today's date and the
@@ -362,7 +383,7 @@ code {{ font-family: ui-monospace, monospace; background: #f3f3f3; padding: 1px 
        border-radius: 3px; }}
 pre {{ background: #f3f3f3; padding: 1em; border-radius: 4px; overflow-x: auto; }}
 button {{ padding: 0.6em 1.4em; font-size: 1em; border-radius: 4px; border: 0;
-         cursor: pointer; background: #2466b8; color: white; margin-top: 0.8em; }}
+         cursor: pointer; background: #582C83; color: white; margin-top: 0.8em; }}
 button:hover {{ opacity: 0.9; }}
 .fallback {{ color: #666; font-size: 0.9em; margin-top: 0.6em; }}
 </style>
@@ -412,6 +433,7 @@ def render_form(defaults: dict, errors: list[str] | None = None) -> str:
     format_checkboxes = "\n".join(checkboxes)
 
     return FORM_HTML.format(
+        logo_html=LOGO_HTML,
         errors_html=errors_html,
         last=defaults.get("last", ""),
         first=defaults.get("first", ""),
