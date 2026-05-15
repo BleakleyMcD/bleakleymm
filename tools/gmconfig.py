@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import http.server
 import json
-import shlex
 import subprocess
 import sys
 import threading
@@ -196,12 +196,21 @@ def create_session_dirs(session: dict) -> list[Path]:
 
 # --- Validation ----------------------------------------------------------------
 
+_UNSAFE_NAME_CHARS = ("/", "\\", "\x00")
+
+
 def validate(form: dict) -> list[str]:
     """Return a list of error messages; empty list means form is valid."""
     errors: list[str] = []
     for required in ("first", "last", "operator", "study_collection_number", "gm_dir"):
         if not form.get(required, "").strip():
             errors.append(f"{required} is required.")
+    # `first` and `last` get baked into a path segment ({date}_{last}_{first}); reject
+    # characters that would let a typo escape the chosen output directory.
+    for name_field in ("first", "last"):
+        v = form.get(name_field, "")
+        if v and (v == ".." or any(c in v for c in _UNSAFE_NAME_CHARS)):
+            errors.append(f"{name_field} contains invalid characters (no slashes or '..').")
     fmts = form.get("formats", [])
     if not fmts:
         errors.append("At least one format must be selected.")
@@ -481,7 +490,7 @@ def render_form(defaults: dict, errors: list[str] | None = None) -> str:
     """Render the HTML form, optionally with errors shown above it."""
     errors_html = ""
     if errors:
-        items = "".join(f"<li>{e}</li>" for e in errors)
+        items = "".join(f"<li>{html.escape(e)}</li>" for e in errors)
         errors_html = f'<div class="errors"><strong>Please fix:</strong><ul>{items}</ul></div>'
 
     selected = set(defaults.get("formats", []))
@@ -497,11 +506,11 @@ def render_form(defaults: dict, errors: list[str] | None = None) -> str:
     return FORM_HTML.format(
         logo_html=LOGO_HTML,
         errors_html=errors_html,
-        last=defaults.get("last", ""),
-        first=defaults.get("first", ""),
-        operator=defaults.get("operator", ""),
-        scn=defaults.get("study_collection_number", "SC.0001"),
-        gm_dir=defaults.get("gm_dir", ""),
+        last=html.escape(defaults.get("last", "")),
+        first=html.escape(defaults.get("first", "")),
+        operator=html.escape(defaults.get("operator", "")),
+        scn=html.escape(defaults.get("study_collection_number", "SC.0001")),
+        gm_dir=html.escape(defaults.get("gm_dir", "")),
         today=date_iso(),
         format_checkboxes=format_checkboxes,
     )
@@ -509,10 +518,10 @@ def render_form(defaults: dict, errors: list[str] | None = None) -> str:
 
 def render_success(session: dict) -> str:
     return SUCCESS_HTML.format(
-        first=session["profile"]["first"],
-        last=session["profile"]["last"],
-        session_dir=session["session_dir"],
-        session_json=json.dumps(session, indent=2),
+        first=html.escape(session["profile"]["first"]),
+        last=html.escape(session["profile"]["last"]),
+        session_dir=html.escape(session["session_dir"]),
+        session_json=html.escape(json.dumps(session, indent=2)),
     )
 
 
