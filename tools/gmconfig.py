@@ -247,22 +247,24 @@ FORM_HTML = """\
 <title>Great Migration appointment setup</title>
 <style>
 :root {{
-  --fg: #222; --muted: #666; --bg: #fafafa; --card: #fff;
+  --fg: #222; --muted: #666; --bg: #582C83; --card: #fff;
   --border: #ccc; --accent: #582C83; --err: #c0392b; --errbg: #fdecea;
 }}
-.logo-bar {{ text-align: center; margin: 0 0 1.5em; }}
-.logo-bar img {{ max-width: 420px; width: 100%; height: auto; }}
 body {{
   font-family: -apple-system, system-ui, "Helvetica Neue", sans-serif;
-  color: var(--fg); background: var(--bg);
+  color: #fff; background: var(--bg);
   max-width: 760px; margin: 2em auto; padding: 0 1em; line-height: 1.4;
 }}
-h1 {{ margin-top: 0; }}
+h1 {{ margin-top: 0; color: #fff; }}
+.logo-bar {{ background: #fff; padding: 0.8em 1em; border-radius: 6px;
+            text-align: center; margin: 0 0 1.5em; }}
+.logo-bar img {{ max-width: 420px; width: 100%; height: auto; }}
 fieldset {{
   margin: 1em 0; padding: 1em 1.2em; border: 1px solid var(--border);
-  border-radius: 6px; background: var(--card);
+  border-radius: 6px; background: var(--card); color: var(--fg);
 }}
-legend {{ font-weight: bold; padding: 0 0.5em; color: var(--accent); }}
+legend {{ font-weight: bold; padding: 0.1em 0.5em; color: var(--fg);
+         background: var(--card); border: 1px solid var(--border); border-radius: 4px; }}
 label {{ display: block; margin: 0.6em 0; }}
 label > span {{ display: block; margin-bottom: 0.2em; }}
 input[type=text] {{
@@ -287,6 +289,7 @@ button {{
 }}
 button.browse {{ padding: 0.45em 0.9em; background: #eee; color: var(--fg); border: 1px solid var(--border); }}
 button.abort {{ background: var(--err); }}
+button[type="submit"] {{ background: #2e8b57; }}
 .actions {{ display: flex; gap: 0.6em; align-items: center; margin-top: 0.5em; }}
 button:hover {{ opacity: 0.9; }}
 .namecheck {{ font-family: ui-monospace, monospace; color: var(--muted); font-size: 0.88em; margin-top: 0.3em; }}
