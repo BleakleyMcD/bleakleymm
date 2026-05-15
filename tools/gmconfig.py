@@ -81,14 +81,14 @@ FORMATS_BY_ID: dict[str, Format] = {f.id: f for f in FORMATS}
 # resulting text is the same as what the team was producing before.
 GENERAL_NOTES_TEMPLATE = (
     "These are general notes concerning the appointment of {first} {last} on {date}. "
-    "They were written by the operator, {operator}, and contain observations about the "
+    "They were written by the TBM preservationist, {operator}, and contain observations about the "
     "appointment and information relayed by {first} {last}.\n"
 )
 
 FORMAT_NOTES_TEMPLATE = (
     "These are notes concerning the {description} of {first} {last} which were "
-    "{verb_past} on {date} by the operator {operator}. They cover technical and "
-    "preservation concerns of the {medium}, noted by the operator at the time of "
+    "{verb_past} on {date} by the TBM preservationist {operator}. They cover technical and "
+    "preservation concerns of the {medium}, noted by the TBM preservationist at the time of "
     "initial inspection and {verb_noun}, not content of the {medium}.\n"
 )
 
