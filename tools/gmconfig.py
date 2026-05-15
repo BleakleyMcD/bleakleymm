@@ -39,8 +39,12 @@ log = get_logger()
 
 # --- Constants -----------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ET = ZoneInfo("America/New_York")
+
+
+class SessionExistsError(Exception):
+    """Raised when the target session dir already has content and --force wasn't given."""
 
 
 @dataclass(frozen=True)
@@ -115,20 +119,17 @@ def date_hyphen() -> str:
     return datetime.now(ET).strftime("%Y-%m-%d")
 
 
-def session_dir_name(last: str, first: str) -> str:
-    """Folder name for a session, e.g. '20260513_Smith_Jane'."""
-    return f"{date_iso()}_{last}_{first}"
-
-
 def build_session(form: dict) -> dict:
     """Assemble the session.json structure from form data."""
     gm_dir = Path(form["gm_dir"]).expanduser().resolve()
-    sub = session_dir_name(form["last"], form["first"])
+    appointment_date = date_hyphen()  # YYYY-MM-DD
+    sub = f"{appointment_date.replace('-', '')}_{form['last']}_{form['first']}"
     session_dir = gm_dir / sub
     selected = [FORMATS_BY_ID[fid] for fid in form["formats"]]
     return {
         "schema_version": SCHEMA_VERSION,
         "created": now_local_iso(),
+        "appointment_date": appointment_date,
         "operator": form["operator"],
         "profile": {
             "first": form["first"],
@@ -157,8 +158,11 @@ def create_session_dirs(session: dict) -> list[Path]:
     profile = session["profile"]
     first, last = profile["first"], profile["last"]
     operator = session["operator"]
-    d_hyphen = date_hyphen()
-    d_iso = date_iso()
+    # Pin filename dates to what the session was built with so --from-config on a
+    # later day, or a form left open across midnight, doesn't produce note files
+    # named with a different date than the session dir.
+    d_hyphen = session["appointment_date"]
+    d_iso = d_hyphen.replace("-", "")
     created: list[Path] = []
 
     # General notes file for the whole appointment.
@@ -323,7 +327,7 @@ profile's last and first names.</p>
     <label>
       <span>Study collection number *</span>
       <input type="text" name="study_collection_number" value="{scn}" placeholder="SC.0001" required>
-      <div class="helptext">Default is <code>SC.0001</code> — only change this if the study collection number is something else. The dot is converted to an underscore in filenames (e.g. <code>SC_0001</code>).</div>
+      <div class="helptext">Default is <code>SC.0001</code> — only change this if the study collection number is something else.</div>
     </label>
   </fieldset>
 
@@ -486,6 +490,41 @@ function exitNow() {
 """
 
 
+# Rendered when filesystem work in do_POST fails. Uses single braces (no .format
+# placeholders here) — the message is substituted by render_error() with f-string.
+ERROR_HTML_TEMPLATE = """\
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Session creation failed</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 760px;
+       margin: 2em auto; padding: 0 1em;
+       background: #15151a; color: #e0e0e0; }}
+.err {{ background: #2e1a1a; border: 1px solid #8a4a4a;
+       color: #e8c5c5; padding: 1em; border-radius: 6px; }}
+.err h1 {{ color: #f0d5d5; margin-top: 0; }}
+pre {{ background: #1f1f24; color: #e0e0e0; padding: 1em;
+      border-radius: 4px; overflow-x: auto; }}
+</style>
+</head>
+<body>
+<div class="err">
+<h1>Session creation failed</h1>
+<p>The form was valid, but writing the session to disk failed. Nothing partial
+was committed; check the message below and try again from the terminal.</p>
+<pre>{message}</pre>
+</div>
+</body>
+</html>
+"""
+
+
+def render_error(message: str) -> str:
+    return ERROR_HTML_TEMPLATE.format(message=html.escape(message))
+
+
 def render_form(defaults: dict, errors: list[str] | None = None) -> str:
     """Render the HTML form, optionally with errors shown above it."""
     errors_html = ""
@@ -534,6 +573,9 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
     submitted_session: dict | None = None
     submission_event: threading.Event | None = None
     aborted: bool = False
+    creation_error: str | None = None
+    create_dirs: bool = True
+    force: bool = False
 
     def log_message(self, format, *args):  # noqa: A002 — match BaseHTTPRequestHandler signature
         # Quiet — don't spam stderr with one line per request.
@@ -548,8 +590,8 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 — http.server naming
         if self.path == "/" or self.path.startswith("/?"):
-            html = render_form(defaults={})
-            self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+            body = render_form(defaults={})
+            self._send(200, "text/html; charset=utf-8", body.encode("utf-8"))
         elif self.path == "/pick_dir":
             self._handle_pick_dir()
         else:
@@ -578,16 +620,32 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
         }
         errors = validate(form)
         if errors:
-            html = render_form(defaults=form, errors=errors)
-            self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+            body = render_form(defaults=form, errors=errors)
+            self._send(200, "text/html; charset=utf-8", body.encode("utf-8"))
             return
 
         session = build_session(form)
-        # Send success page first so the browser can show it before we tear down.
-        html = render_success(session)
-        self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+        # Do filesystem work *before* telling the browser it succeeded. If the
+        # disk is full / target is a file / dir already has content (without
+        # --force) / etc., the browser should see an error page, not "Session
+        # created" while nothing was actually written.
+        try:
+            do_session_creation(
+                session,
+                create_dirs=_FormHandler.create_dirs,
+                force=_FormHandler.force,
+            )
+        except Exception as e:
+            log.error(f"Session creation failed: {e}")
+            self._send(500, "text/html; charset=utf-8",
+                       render_error(str(e)).encode("utf-8"))
+            _FormHandler.creation_error = str(e)
+            if _FormHandler.submission_event is not None:
+                _FormHandler.submission_event.set()
+            return
 
-        # Hand the validated session back to the main thread and signal it.
+        html_out = render_success(session)
+        self._send(200, "text/html; charset=utf-8", html_out.encode("utf-8"))
         _FormHandler.submitted_session = session
         if _FormHandler.submission_event is not None:
             _FormHandler.submission_event.set()
@@ -612,12 +670,17 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
                    json.dumps({"path": path}).encode("utf-8"))
 
 
-def run_form_server() -> dict:
-    """Start the form server, open a browser, block until the form is submitted.
-    Returns the validated session dict. Exits the process if the user aborts."""
+def run_form_server(*, create_dirs: bool, force: bool) -> int:
+    """Start the form server, open a browser, block until submit/abort.
+    Filesystem work happens in the handler, so this returns the final exit
+    code: 0 on success, non-zero if creation failed. Exits the process on abort
+    or Ctrl-C."""
     _FormHandler.submitted_session = None
     _FormHandler.submission_event = threading.Event()
     _FormHandler.aborted = False
+    _FormHandler.creation_error = None
+    _FormHandler.create_dirs = create_dirs
+    _FormHandler.force = force
     server = http.server.HTTPServer(("127.0.0.1", 0), _FormHandler)
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/"
@@ -638,7 +701,9 @@ def run_form_server() -> dict:
     if _FormHandler.aborted:
         log.warning("Aborted from browser — no session created.")
         sys.exit(130)
-    return _FormHandler.submitted_session  # type: ignore[return-value]
+    if _FormHandler.creation_error:
+        return 2
+    return 0
 
 
 # --- CLI fallback --------------------------------------------------------------
@@ -721,12 +786,18 @@ def _print_tree_children(parent: Path, prefix: str) -> None:
             _print_tree_children(child, prefix + extension)
 
 
-def do_session_creation(session: dict, *, create_dirs: bool) -> int:
+def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False) -> int:
     """Write session.json (always); create per-format dirs (if requested).
+    Raises SessionExistsError if the target dir has content and force is False.
     Logs what was done; returns 0 on success."""
     session_dir = Path(session["session_dir"])
     if session_dir.exists() and any(session_dir.iterdir()):
-        log.warning(f"Session dir already exists with content: {session_dir}")
+        if not force:
+            raise SessionExistsError(
+                f"Session dir already has contents: {session_dir}. "
+                f"Pass --force to merge into the existing dir."
+            )
+        log.warning(f"Session dir exists with content; --force given, will merge into {session_dir}")
 
     json_path = write_session_json(session)
 
@@ -739,8 +810,57 @@ def do_session_creation(session: dict, *, create_dirs: bool) -> int:
     return 0
 
 
+def validate_session(session: dict) -> list[str]:
+    """Validate a loaded session.json. Returns list of errors; empty = valid.
+    Mirrors form validation so --from-config can't trust a malformed/edited file
+    to write outside the intended GM root or trip on missing keys later."""
+    errs: list[str] = []
+
+    for k in ("operator", "profile", "formats", "session_dir", "gm_dir", "appointment_date"):
+        if k not in session:
+            errs.append(f"Missing required key: {k}")
+    if errs:
+        return errs  # downstream checks would IndexError without these
+
+    profile = session.get("profile")
+    if not isinstance(profile, dict):
+        errs.append(f"profile must be an object, got {type(profile).__name__}")
+    else:
+        for k in ("first", "last"):
+            v = profile.get(k, "")
+            if not isinstance(v, str) or not v.strip():
+                errs.append(f"profile.{k} is missing or empty")
+            elif v == ".." or any(c in v for c in _UNSAFE_NAME_CHARS):
+                errs.append(f"profile.{k} contains invalid characters (no slashes or '..')")
+
+    fmts = session.get("formats")
+    if not isinstance(fmts, list) or not fmts:
+        errs.append("formats must be a non-empty list")
+    else:
+        for i, f in enumerate(fmts):
+            if not isinstance(f, dict) or "id" not in f:
+                errs.append(f"formats[{i}] is malformed: {f!r}")
+            elif f["id"] not in FORMATS_BY_ID:
+                errs.append(f"formats[{i}] has unknown id: {f['id']!r}")
+
+    gm_dir = session.get("gm_dir", "")
+    session_dir = session.get("session_dir", "")
+    if isinstance(gm_dir, str) and isinstance(session_dir, str) and gm_dir and session_dir:
+        gp = Path(gm_dir).expanduser()
+        sp = Path(session_dir).expanduser()
+        if not gp.is_dir():
+            errs.append(f"gm_dir does not exist or is not a directory: {gp}")
+        else:
+            try:
+                sp.resolve().relative_to(gp.resolve())
+            except ValueError:
+                errs.append(f"session_dir is not inside gm_dir: {sp} (gm_dir={gp})")
+
+    return errs
+
+
 def load_session(path: Path) -> dict:
-    """Load and minimally validate an existing session.json."""
+    """Load and fully validate an existing session.json."""
     if not path.exists():
         log.error(f"Config not found: {path}")
         sys.exit(2)
@@ -749,14 +869,18 @@ def load_session(path: Path) -> dict:
     except json.JSONDecodeError as e:
         log.error(f"Could not parse {path}: {e}")
         sys.exit(2)
+    if not isinstance(data, dict):
+        log.error(f"Top-level session.json must be an object, got {type(data).__name__}")
+        sys.exit(2)
     if data.get("schema_version") != SCHEMA_VERSION:
         log.warning(f"Schema version mismatch in {path} "
                     f"(file={data.get('schema_version')}, code={SCHEMA_VERSION})")
-    # Sanity check the required keys.
-    for k in ("operator", "profile", "formats", "session_dir"):
-        if k not in data:
-            log.error(f"Missing key in session.json: {k}")
-            sys.exit(2)
+    errors = validate_session(data)
+    if errors:
+        log.error(f"Invalid session in {path}:")
+        for e in errors:
+            log.error(f"  - {e}")
+        sys.exit(2)
     return data
 
 
@@ -775,18 +899,25 @@ def main() -> int:
                       help="Skip the form. Read an existing session.json and create its dirs.")
     mode.add_argument("--cli", action="store_true",
                       help="Use terminal prompts instead of the browser form.")
+    p.add_argument("--force", action="store_true",
+                   help="Overwrite/merge into an existing non-empty session dir.")
     args = p.parse_args()
+    create_dirs = not args.config_only
 
-    if args.from_config:
-        session = load_session(args.from_config)
-        return do_session_creation(session, create_dirs=True)
-
-    if args.cli:
-        session = run_cli_form()
-    else:
-        session = run_form_server()
-
-    return do_session_creation(session, create_dirs=not args.config_only)
+    try:
+        if args.from_config:
+            session = load_session(args.from_config)
+            return do_session_creation(session, create_dirs=True, force=args.force)
+        if args.cli:
+            session = run_cli_form()
+            return do_session_creation(session, create_dirs=create_dirs, force=args.force)
+        # Browser form path: filesystem work happens inside the handler so we
+        # can render an error page if it fails. run_form_server returns the
+        # final exit code.
+        return run_form_server(create_dirs=create_dirs, force=args.force)
+    except SessionExistsError as e:
+        log.error(str(e))
+        return 2
 
 
 if __name__ == "__main__":
