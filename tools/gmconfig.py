@@ -360,9 +360,15 @@ async function browseDir() {{
 async function abortSession() {{
   if (!confirm('Abort? Nothing will be created and you will return to the terminal.')) return;
   try {{
-    await fetch('/abort', {{method: 'POST'}});
-  }} catch (e) {{ /* server exits right after; fetch may not resolve cleanly */ }}
-  window.close();
+    const r = await fetch('/abort', {{method: 'POST'}});
+    const txt = await r.text();
+    document.open();
+    document.write(txt);
+    document.close();
+  }} catch (e) {{
+    document.body.innerHTML = '<h1 style="color:#e0e0e0;background:#15151a;padding:1em;">Aborted — you can close this tab.</h1>';
+    document.body.style.background = '#15151a';
+  }}
 }}
 </script>
 
@@ -379,16 +385,24 @@ SUCCESS_HTML = """\
 <title>Session created</title>
 <style>
 body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 760px;
-       margin: 2em auto; padding: 0 1em; }}
-.ok {{ background: #e7f6ec; border: 1px solid #2e8b57; padding: 1em;
-      border-radius: 6px; color: #1d5a37; }}
-code {{ font-family: ui-monospace, monospace; background: #f3f3f3; padding: 1px 4px;
-       border-radius: 3px; }}
-pre {{ background: #f3f3f3; padding: 1em; border-radius: 4px; overflow-x: auto; }}
+       margin: 2em auto; padding: 0 1em;
+       background: #15151a; color: #e0e0e0; }}
+.ok {{ background: #1c2e1f; border: 1px solid #3a7a4a;
+      color: #c5e2cc; padding: 1em; border-radius: 6px; }}
+.ok h1 {{ color: #d5e8d8; margin-top: 0; }}
+.ok strong {{ color: #e8f5e8; }}
+h3 {{ color: #d0d0d0; }}
+code {{ font-family: ui-monospace, monospace; background: #2a2a30;
+       color: #e8e8e8; padding: 1px 4px; border-radius: 3px; }}
+pre {{ background: #1f1f24; color: #e0e0e0; padding: 1em;
+      border-radius: 4px; overflow-x: auto; }}
 button {{ padding: 0.6em 1.4em; font-size: 1em; border-radius: 4px; border: 0;
          cursor: pointer; background: #582C83; color: white; margin-top: 0.8em; }}
 button:hover {{ opacity: 0.9; }}
-.fallback {{ color: #666; font-size: 0.9em; margin-top: 0.6em; }}
+.fallback {{ color: #888; font-size: 0.9em; margin-top: 0.6em; }}
+kbd {{ background: #2a2a30; border: 1px solid #444; padding: 1px 5px;
+      border-radius: 3px; font-family: ui-monospace, monospace;
+      font-size: 0.85em; color: #e0e0e0; }}
 </style>
 </head>
 <body>
@@ -412,6 +426,51 @@ function exitNow() {{
     document.getElementById('fallback').style.display = 'block';
   }}, 300);
 }}
+</script>
+</body>
+</html>
+"""
+
+
+# No format placeholders, so single braces in the CSS are fine.
+ABORT_HTML = """\
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Session aborted</title>
+<style>
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 760px;
+       margin: 2em auto; padding: 0 1em;
+       background: #15151a; color: #e0e0e0; }
+.aborted { background: #2a2026; border: 1px solid #6a4a55;
+          color: #d8c0c8; padding: 1em; border-radius: 6px; }
+.aborted h1 { color: #ebcad2; margin-top: 0; }
+button { padding: 0.6em 1.4em; font-size: 1em; border-radius: 4px; border: 0;
+         cursor: pointer; background: #582C83; color: white; margin-top: 0.8em; }
+button:hover { opacity: 0.9; }
+.fallback { color: #888; font-size: 0.9em; margin-top: 0.6em; }
+kbd { background: #2a2a30; border: 1px solid #444; padding: 1px 5px;
+      border-radius: 3px; font-family: ui-monospace, monospace;
+      font-size: 0.85em; color: #e0e0e0; }
+</style>
+</head>
+<body>
+<div class="aborted">
+<h1>Session aborted</h1>
+<p>No session was created. The script has exited; you can close this tab and return to your terminal.</p>
+<button onclick="exitNow()">Exit</button>
+<p id="fallback" class="fallback" style="display:none;">
+  Your browser blocked auto-close. Press <kbd>⌘W</kbd> to close this tab.
+</p>
+</div>
+<script>
+function exitNow() {
+  window.close();
+  setTimeout(function() {
+    document.getElementById('fallback').style.display = 'block';
+  }, 300);
+}
 </script>
 </body>
 </html>
@@ -489,7 +548,7 @@ class _FormHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         if self.path == "/abort":
-            self._send(200, "text/plain", b"aborted\n")
+            self._send(200, "text/html; charset=utf-8", ABORT_HTML.encode("utf-8"))
             _FormHandler.aborted = True
             if _FormHandler.submission_event is not None:
                 _FormHandler.submission_event.set()
