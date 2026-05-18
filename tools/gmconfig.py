@@ -1018,14 +1018,16 @@ def _print_tree_children(parent: Path, prefix: str) -> None:
 def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False) -> int:
     """Stage and commit a session.
 
-    Writes session.json to a temp path, runs all per-format mkdirs/note writes,
-    and only then atomically promotes the temp file to session.json. If any
-    step fails, rolls back: removes the temp file plus every path we created
-    in this call. A pre-existing session.json (in --force merge mode) is never
-    touched until the atomic rename, so a mid-flight failure leaves it intact.
+    Writes session.json to a uniquely-named temp file, runs all per-format
+    mkdirs/note writes, then atomically promotes the temp to session.json.
+    On any failure, _rollback() removes ONLY paths we explicitly tracked.
+    We never rmtree the session dir — that branch existed in an earlier
+    revision and could destroy a real session.json carried over from a
+    prior --config-only run that the artifact filter correctly hides
+    from the collision guard.
 
     Raises SessionExistsError if the target path exists but isn't a directory,
-    or if the directory has content and `force` is False.
+    or if it contains non-gmconfig files and `force` is False.
     """
     session_dir = Path(session["session_dir"])
     if session_dir.exists() and not session_dir.is_dir():
@@ -1041,9 +1043,9 @@ def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False
         external_content = [p for p in session_dir.iterdir() if not _is_own_artifact(p)]
     else:
         external_content = []
-    dir_had_content_before = bool(external_content)
+    dir_had_external_content_before = bool(external_content)
 
-    if dir_had_content_before:
+    if dir_had_external_content_before:
         if not force:
             raise SessionExistsError(
                 f"Session dir contains files that aren't gmconfig artifacts: {session_dir}. "
@@ -1051,43 +1053,27 @@ def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False
             )
         log.warning(f"Session dir has external content; --force given, will merge into {session_dir}")
 
-    # Stage session.json under a unique temp name. The atomic rename to the
-    # real path is the LAST step, so a mid-flight failure never clobbers a
-    # pre-existing session.json. The unique suffix from tempfile.mkstemp via
-    # NamedTemporaryFile guarantees we never collide with a stale tmp from a
-    # prior interrupted run (or a concurrent run on the same dir).
-    session_dir.mkdir(parents=True, exist_ok=True)
     real_json_path = session_dir / "session.json"
-    tmp_handle = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8",
-        dir=str(session_dir), prefix="session.json.", suffix=".tmp",
-        delete=False,
-    )
-    try:
-        json.dump(session, tmp_handle, indent=2)
-        tmp_handle.write("\n")
-    finally:
-        tmp_handle.close()
-    tmp_json_path = Path(tmp_handle.name)
 
-    # Mutable accumulators threaded through create_session_dirs so partial
-    # state is visible to _rollback even if a step inside that function
-    # raises before it returns.
-    created_files: list[Path] = [tmp_json_path]
+    # Tracking lists are declared OUTSIDE the try so _rollback() — defined
+    # below, also outside the try — closes over them. They start empty and
+    # are populated as each staging step succeeds. If any step raises (even
+    # the very first one), _rollback only ever unlinks what's actually been
+    # recorded.
+    created_files: list[Path] = []
     created_dirs: list[Path] = []
+    tmp_json_path: Path | None = None  # set the instant the tmp file exists
 
     def _rollback():
-        # If session_dir had no content before this call (or didn't exist),
-        # everything inside it now is ours and we can clear the slate safely.
-        # If --force was passed to merge into an already-populated dir, fall
-        # back to selective cleanup so we never touch the user's prior files.
-        if not dir_had_content_before:
+        # Selective cleanup only. Never rmtree the session dir — there may
+        # be a pre-existing session.json from --config-only or a prior
+        # --from-config attempt that we must not destroy.
+        nonlocal tmp_json_path
+        if tmp_json_path is not None:
             try:
-                if session_dir.exists():
-                    shutil.rmtree(session_dir)
+                tmp_json_path.unlink(missing_ok=True)
             except OSError as e:
-                log.warning(f"rollback: could not remove {session_dir}: {e}")
-            return
+                log.warning(f"rollback: could not remove {tmp_json_path}: {e}")
         for f in reversed(created_files):
             try:
                 f.unlink(missing_ok=True)
@@ -1106,19 +1092,53 @@ def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False
                 except OSError:
                     break
                 cur = cur.parent
+        # If we created session_dir itself (it didn't exist before), and it's
+        # now empty after the cleanup above, remove it too. If it contains
+        # anything we don't track (carried-over session.json, user files
+        # under --force, etc.), rmdir fails and we leave it untouched.
+        if not dir_existed_before:
+            try:
+                session_dir.rmdir()
+            except OSError:
+                pass
 
     try:
+        # All filesystem-mutating staging is inside the try block so any
+        # partial state is reachable by _rollback. (Previously mkdir + tmp
+        # write happened above the try; an early staging failure left a new
+        # session_dir plus a partial tmp file with no cleanup hook.)
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Unique tmp name via tempfile so we never collide with — and silently
+        # overwrite — a pre-existing session.json.<rand>.tmp left by a prior
+        # interrupted run or a concurrent invocation.
+        tmp_handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8",
+            dir=str(session_dir), prefix="session.json.", suffix=".tmp",
+            delete=False,
+        )
+        # Record the tmp path immediately — NamedTemporaryFile creates the
+        # file as part of __init__, so even if json.dump below raises, the
+        # file is on disk and _rollback needs to know about it.
+        tmp_json_path = Path(tmp_handle.name)
+        try:
+            json.dump(session, tmp_handle, indent=2)
+            tmp_handle.write("\n")
+        finally:
+            tmp_handle.close()
+
         if create_dirs:
             create_session_dirs(
                 session,
                 created_files=created_files,
                 created_dirs=created_dirs,
             )
-        # Atomic commit — point of no return. After this rename, session.json
-        # on disk is the new content; if it existed before, that content has
-        # been replaced. Everything before this point can be rolled back; the
-        # post-rename steps below are cosmetic (logging + tree print).
+        # Atomic commit — point of no return. After this rename succeeds,
+        # session.json on disk is the new content. We zero tmp_json_path so
+        # any logging-stage failure (extremely unlikely) doesn't try to
+        # roll back a commit we already made.
         tmp_json_path.replace(real_json_path)
+        tmp_json_path = None
     except Exception:
         log.error("Session creation failed; rolling back any partial writes.")
         _rollback()
