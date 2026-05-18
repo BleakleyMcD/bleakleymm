@@ -23,6 +23,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -238,6 +239,18 @@ def _is_valid_iso_date(s: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_own_artifact(p: Path) -> bool:
+    """True if `p` is one of gmconfig's own files in session_dir: the canonical
+    session.json or a uniquely-named staging temp file (session.json.<rand>.tmp).
+    Used to keep the documented --config-only -> --from-config workflow from
+    tripping the "session_dir has content" guard on its own session.json, and
+    to ignore stale tmps from a previous crashed run."""
+    name = p.name
+    return name == "session.json" or (
+        name.startswith("session.json.") and name.endswith(".tmp")
+    )
 
 
 def validate(form: dict) -> list[str]:
@@ -1020,23 +1033,42 @@ def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False
             f"Target path exists but is not a directory: {session_dir}"
         )
     dir_existed_before = session_dir.is_dir()
-    dir_had_content_before = dir_existed_before and any(session_dir.iterdir())
+    # Ignore our own artifacts when deciding whether the dir is "occupied":
+    # a session.json from a prior --config-only is the canonical handoff for
+    # --from-config and shouldn't trip the collision guard. Same for any
+    # stale unique-named session.json.<rand>.tmp from an interrupted run.
+    if dir_existed_before:
+        external_content = [p for p in session_dir.iterdir() if not _is_own_artifact(p)]
+    else:
+        external_content = []
+    dir_had_content_before = bool(external_content)
 
     if dir_had_content_before:
         if not force:
             raise SessionExistsError(
-                f"Session dir already has contents: {session_dir}. "
+                f"Session dir contains files that aren't gmconfig artifacts: {session_dir}. "
                 f"Pass --force to merge into the existing dir."
             )
-        log.warning(f"Session dir exists with content; --force given, will merge into {session_dir}")
+        log.warning(f"Session dir has external content; --force given, will merge into {session_dir}")
 
-    # Stage session.json under a temp name. The atomic rename to the real path
-    # is the LAST step, so a mid-flight failure never clobbers a pre-existing
-    # session.json from a prior --from-config import or earlier successful run.
+    # Stage session.json under a unique temp name. The atomic rename to the
+    # real path is the LAST step, so a mid-flight failure never clobbers a
+    # pre-existing session.json. The unique suffix from tempfile.mkstemp via
+    # NamedTemporaryFile guarantees we never collide with a stale tmp from a
+    # prior interrupted run (or a concurrent run on the same dir).
     session_dir.mkdir(parents=True, exist_ok=True)
     real_json_path = session_dir / "session.json"
-    tmp_json_path = session_dir / "session.json.tmp"
-    tmp_json_path.write_text(json.dumps(session, indent=2) + "\n")
+    tmp_handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8",
+        dir=str(session_dir), prefix="session.json.", suffix=".tmp",
+        delete=False,
+    )
+    try:
+        json.dump(session, tmp_handle, indent=2)
+        tmp_handle.write("\n")
+    finally:
+        tmp_handle.close()
+    tmp_json_path = Path(tmp_handle.name)
 
     # Mutable accumulators threaded through create_session_dirs so partial
     # state is visible to _rollback even if a step inside that function
@@ -1112,6 +1144,14 @@ def validate_session(session: dict) -> list[str]:
     if errs:
         return errs  # downstream checks would IndexError without these
 
+    # Scalar string fields. Emitting an explicit type error (rather than silently
+    # passing when the type is wrong) keeps a hand-edited config from making it
+    # past --from-config validation and then exploding later in Path() or string
+    # concatenation.
+    operator = session.get("operator")
+    if not isinstance(operator, str) or not operator.strip():
+        errs.append(f"operator must be a non-empty string (got: {operator!r})")
+
     profile = session.get("profile")
     if not isinstance(profile, dict):
         errs.append(f"profile must be an object, got {type(profile).__name__}")
@@ -1130,11 +1170,24 @@ def validate_session(session: dict) -> list[str]:
         for i, f in enumerate(fmts):
             if not isinstance(f, dict) or "id" not in f:
                 errs.append(f"formats[{i}] is malformed: {f!r}")
-            elif f["id"] not in FORMATS_BY_ID:
-                errs.append(f"formats[{i}] has unknown id: {f['id']!r}")
+                continue
+            # `f["id"] in FORMATS_BY_ID` calls hash(f["id"]); unhashable values
+            # (list, dict) would raise TypeError here. Reject non-string ids
+            # explicitly before any membership test.
+            fid = f["id"]
+            if not isinstance(fid, str):
+                errs.append(f"formats[{i}].id must be a string, got {type(fid).__name__}")
+            elif fid not in FORMATS_BY_ID:
+                errs.append(f"formats[{i}] has unknown id: {fid!r}")
 
-    gm_dir = session.get("gm_dir", "")
-    session_dir = session.get("session_dir", "")
+    gm_dir = session.get("gm_dir")
+    session_dir = session.get("session_dir")
+    # Explicit type errors first so a numeric/list value doesn't silently slip
+    # past the inner isinstance gate of the path check.
+    if not isinstance(gm_dir, str) or not gm_dir:
+        errs.append(f"gm_dir must be a non-empty string (got: {gm_dir!r})")
+    if not isinstance(session_dir, str) or not session_dir:
+        errs.append(f"session_dir must be a non-empty string (got: {session_dir!r})")
     if isinstance(gm_dir, str) and isinstance(session_dir, str) and gm_dir and session_dir:
         gp = Path(gm_dir).expanduser()
         sp = Path(session_dir).expanduser()
