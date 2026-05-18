@@ -147,18 +147,29 @@ def build_session(form: dict) -> dict:
     }
 
 
-def write_session_json(session: dict) -> Path:
-    """Write session.json inside the session dir. Creates session dir if missing."""
-    session_dir = Path(session["session_dir"])
-    session_dir.mkdir(parents=True, exist_ok=True)
-    path = session_dir / "session.json"
-    path.write_text(json.dumps(session, indent=2) + "\n")
-    return path
-
-
-def create_session_dirs(session: dict) -> list[Path]:
+def create_session_dirs(
+    session: dict,
+    *,
+    created_files: list[Path] | None = None,
+    created_dirs: list[Path] | None = None,
+) -> list[Path]:
     """Create per-format ACCESS/PRESERVATION subdirs + notes files.
-    Returns list of paths that were created (for terminal reporting)."""
+
+    If `created_files` and `created_dirs` are provided, they are appended to
+    after every successful mkdir / write_text — so if any step raises mid-way,
+    the caller has an accurate record of partial state for rollback. (Without
+    this, the returned list would be inaccessible to the caller when the
+    function raised before returning.) Each format's container dir
+    (e.g. 35mm/) is mkdir'd explicitly so it's tracked too — previously
+    mkdir(parents=True) on the ACCESS subdir would create it implicitly,
+    leaving an orphan empty dir on rollback in the --force merge case.
+
+    Returns the combined list of newly-created paths (for the legacy
+    single-list caller signature; unused by the rollback-aware caller)."""
+    if created_files is None:
+        created_files = []
+    if created_dirs is None:
+        created_dirs = []
     session_dir = Path(session["session_dir"])
     profile = session["profile"]
     first, last = profile["first"], profile["last"]
@@ -168,7 +179,6 @@ def create_session_dirs(session: dict) -> list[Path]:
     # named with a different date than the session dir.
     d_hyphen = session["appointment_date"]
     d_iso = d_hyphen.replace("-", "")
-    created: list[Path] = []
 
     # General notes file for the whole appointment.
     general_notes = session_dir / f"{d_iso}_{last}_{first}_generalNotes.txt"
@@ -176,18 +186,20 @@ def create_session_dirs(session: dict) -> list[Path]:
         general_notes.write_text(GENERAL_NOTES_TEMPLATE.format(
             first=first, last=last, date=d_hyphen, operator=operator,
         ))
-        created.append(general_notes)
+        created_files.append(general_notes)
 
     # Per-format subdirectories + notes.
     for f_entry in session["formats"]:
         fmt = FORMATS_BY_ID[f_entry["id"]]
         fdir = session_dir / fmt.folder
-        access = fdir / "ACCESS"
-        preservation = fdir / "PRESERVATION"
-        for d in (access, preservation):
+        if not fdir.exists():
+            fdir.mkdir()
+            created_dirs.append(fdir)
+        for sub in ("ACCESS", "PRESERVATION"):
+            d = fdir / sub
             if not d.exists():
-                d.mkdir(parents=True)
-                created.append(d)
+                d.mkdir()
+                created_dirs.append(d)
         notes = fdir / f"{d_iso}_{last}_{first}_{fmt.slug}_Notes.txt"
         if not notes.exists():
             notes.write_text(FORMAT_NOTES_TEMPLATE.format(
@@ -199,8 +211,8 @@ def create_session_dirs(session: dict) -> list[Path]:
                 operator=operator,
                 medium=MEDIUM[fmt.media_type],
             ))
-            created.append(notes)
-    return created
+            created_files.append(notes)
+    return created_files + created_dirs
 
 
 # --- Validation ----------------------------------------------------------------
@@ -991,16 +1003,23 @@ def _print_tree_children(parent: Path, prefix: str) -> None:
 
 
 def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False) -> int:
-    """Write session.json (always); create per-format dirs (if requested).
-    Raises SessionExistsError if the target dir has content and force is False.
+    """Stage and commit a session.
 
-    On any failure after we've started writing, removes everything WE created in
-    this call so the user can retry without --force. If --force was passed, or
-    if the session_dir already had unrelated content, only our own additions are
-    removed (we never delete files that were there before this call started).
+    Writes session.json to a temp path, runs all per-format mkdirs/note writes,
+    and only then atomically promotes the temp file to session.json. If any
+    step fails, rolls back: removes the temp file plus every path we created
+    in this call. A pre-existing session.json (in --force merge mode) is never
+    touched until the atomic rename, so a mid-flight failure leaves it intact.
+
+    Raises SessionExistsError if the target path exists but isn't a directory,
+    or if the directory has content and `force` is False.
     """
     session_dir = Path(session["session_dir"])
-    dir_existed_before = session_dir.exists()
+    if session_dir.exists() and not session_dir.is_dir():
+        raise SessionExistsError(
+            f"Target path exists but is not a directory: {session_dir}"
+        )
+    dir_existed_before = session_dir.is_dir()
     dir_had_content_before = dir_existed_before and any(session_dir.iterdir())
 
     if dir_had_content_before:
@@ -1011,10 +1030,18 @@ def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False
             )
         log.warning(f"Session dir exists with content; --force given, will merge into {session_dir}")
 
-    json_path = write_session_json(session)
-    # Track every path we explicitly created. Used only in the rare merge case
-    # below; for the common "fresh dir" case we rmtree session_dir wholesale.
-    created_files: list[Path] = [json_path]
+    # Stage session.json under a temp name. The atomic rename to the real path
+    # is the LAST step, so a mid-flight failure never clobbers a pre-existing
+    # session.json from a prior --from-config import or earlier successful run.
+    session_dir.mkdir(parents=True, exist_ok=True)
+    real_json_path = session_dir / "session.json"
+    tmp_json_path = session_dir / "session.json.tmp"
+    tmp_json_path.write_text(json.dumps(session, indent=2) + "\n")
+
+    # Mutable accumulators threaded through create_session_dirs so partial
+    # state is visible to _rollback even if a step inside that function
+    # raises before it returns.
+    created_files: list[Path] = [tmp_json_path]
     created_dirs: list[Path] = []
 
     def _rollback():
@@ -1034,33 +1061,42 @@ def do_session_creation(session: dict, *, create_dirs: bool, force: bool = False
                 f.unlink(missing_ok=True)
             except OSError as e:
                 log.warning(f"rollback: could not remove {f}: {e}")
-        # Walk created leaf dirs upward, rmdir'ing any that are empty. This
-        # catches intermediate dirs (e.g. 35mm/) that mkdir(parents=True)
-        # created implicitly without being returned by create_session_dirs.
+        # Walk created leaf dirs upward, rmdir'ing any that are empty. Safe by
+        # construction: rmdir only succeeds on empty dirs, so anything we didn't
+        # create (or that the user later added content to) stops the walk.
         seen: set[Path] = set()
         for d in reversed(created_dirs):
             cur = d
             while cur not in seen and cur != session_dir and session_dir in cur.parents:
                 seen.add(cur)
                 try:
-                    cur.rmdir()  # only succeeds if empty — safe by construction
+                    cur.rmdir()
                 except OSError:
-                    break  # not empty (something we didn't create); stop walking up
+                    break
                 cur = cur.parent
 
     try:
         if create_dirs:
-            new_paths = create_session_dirs(session)
-            for p in new_paths:
-                (created_dirs if p.is_dir() else created_files).append(p)
-            log.info(f"Done. Session ready at {session_dir}")
-            _print_tree(session_dir)
-        else:
-            log.info(f"Skipped dir creation (--config-only). Session.json at {json_path}")
+            create_session_dirs(
+                session,
+                created_files=created_files,
+                created_dirs=created_dirs,
+            )
+        # Atomic commit — point of no return. After this rename, session.json
+        # on disk is the new content; if it existed before, that content has
+        # been replaced. Everything before this point can be rolled back; the
+        # post-rename steps below are cosmetic (logging + tree print).
+        tmp_json_path.replace(real_json_path)
     except Exception:
         log.error("Session creation failed; rolling back any partial writes.")
         _rollback()
         raise
+
+    if create_dirs:
+        log.info(f"Done. Session ready at {session_dir}")
+        _print_tree(session_dir)
+    else:
+        log.info(f"Skipped dir creation (--config-only). Session.json at {real_json_path}")
     return 0
 
 
